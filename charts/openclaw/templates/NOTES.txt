@@ -1,0 +1,16 @@
+OpenClaw has been deployed!
+
+Wait for the pod to be ready:
+
+  kubectl wait --namespace {{ .Release.Namespace }} --for=condition=ready pod -l app.kubernetes.io/name={{ include "openclaw.name" . }},app.kubernetes.io/instance={{ .Release.Name }} --timeout=120s
+
+Run onboarding to get started:
+
+  kubectl exec -it --namespace {{ .Release.Namespace }} deploy/{{ include "openclaw.fullname" . }} -c openclaw -- node dist/index.js onboard
+
+To access the web interface:
+
+  export TOKEN=$(kubectl get secret --namespace {{ .Release.Namespace }} {{ include "openclaw.secretName" . }} -o jsonpath="{.data.OPENCLAW_GATEWAY_TOKEN}" | base64 -d)
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "openclaw.fullname" . }} {{ .Values.service.canvasPort }}:{{ .Values.service.canvasPort }}
+
+  Open: http://localhost:{{ .Values.service.canvasPort }}?token=$TOKEN

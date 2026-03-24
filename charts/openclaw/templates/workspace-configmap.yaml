@@ -1,0 +1,25 @@
+{{- if .Values.workspace.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "openclaw.fullname" . }}-workspace
+  labels:
+    {{- include "openclaw.labels" . | nindent 4 }}
+data:
+  {{- if .Values.workspace.soul }}
+  SOUL.md: |
+    {{- .Values.workspace.soul | nindent 4 }}
+  {{- end }}
+  {{- if .Values.workspace.identity }}
+  IDENTITY.md: |
+    {{- .Values.workspace.identity | nindent 4 }}
+  {{- end }}
+  {{- if .Values.workspace.user }}
+  USER.md: |
+    {{- .Values.workspace.user | nindent 4 }}
+  {{- end }}
+  {{- range $filename, $content := .Values.workspace.extraFiles }}
+  {{ $filename }}: |
+    {{- $content | nindent 4 }}
+  {{- end }}
+{{- end }}

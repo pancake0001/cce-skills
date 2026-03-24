@@ -1,0 +1,348 @@
+# OpenClaw Helm Chart Values
+# https://docs.openclaw.ai/
+
+# -- Override the name of the chart
+nameOverride: ""
+# -- Override the full name of the release
+fullnameOverride: ""
+
+# Image configuration
+image:
+  # -- Container image repository
+  repository: ghcr.io/openclaw/openclaw
+  # -- Container image tag
+  tag: "2026.3.13-1"
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+
+# -- Image pull secrets for private registries
+imagePullSecrets: []
+
+# OpenClaw application settings
+openclaw:
+  # -- Bind mode: "lan" for network access, "localhost" for local only
+  bind: "lan"
+  # -- Timezone environment variable
+  timezone: "UTC"
+  # -- Config file mode: "merge" keeps existing config and merges helm values (helm wins conflicts),
+  # "overwrite" replaces config entirely
+  configMode: "merge"
+  # -- Skills to install from ClawHub
+  skills: []
+
+  # Agent configuration (maps to agents.defaults in openclaw.json)
+  agents:
+    defaults:
+      # -- Primary model in provider/model format
+      model: "anthropic/claude-sonnet-4-20250514"
+      # -- Timeout in seconds for agent operations
+      timeoutSeconds: 600
+      # -- Thinking mode: "low", "high", or "off"
+      thinkingDefault: "low"
+
+  # -- Model providers configuration (maps to models.providers in openclaw.json)
+  # Supports additional LLM providers like MiniMax, OpenAI-compatible endpoints, etc.
+  # Example for MiniMax (China):
+  #   providers:
+  #     minimax:
+  #       baseUrl: "https://api.minimaxi.com/anthropic"
+  #       apiKey: "${MINIMAX_API_KEY}"
+  #       api: "anthropic-messages"
+  #       models:
+  #         - id: "MiniMax-M2.7"
+  #           name: "MiniMax M2.7"
+  #           reasoning: false
+  #           input: ["text"]
+  #           contextWindow: 200000
+  #           maxTokens: 8192
+  providers: {}
+
+  # -- Raw JSON overrides merged into openclaw.json
+  # Use this for advanced configuration not covered by other options
+  # Example:
+  #   configOverrides:
+  #     channels:
+  #       telegram:
+  #         enabled: true
+  configOverrides: {}
+
+# -- Custom workspace files for agent persona
+# These files are copied to /home/openclaw/.openclaw/workspace on first install
+# Subsequent changes to these values will NOT overwrite existing files (to preserve agent experience)
+# To force update, delete the PVC and reinstall, or manually edit files in the container
+workspace:
+  # -- Whether to enable custom workspace files
+  enabled: true
+  # -- SOUL.md: Agent personality and behavior definition
+  soul: |
+    # SOUL
+
+    ## Core Identity
+    - You are a helpful AI assistant
+    - Always be concise and direct
+    - Prioritize accuracy over speed
+
+    ## Communication Style
+    - Use clear, simple language
+    - Avoid unnecessary explanations
+    - Respond in the user's language
+
+  # -- IDENTITY.md: Agent identity information
+  identity: |
+    # IDENTITY
+
+    Name: OpenClaw
+    Version: 2026.3
+    Role: AI Assistant
+
+  # -- USER.md: User information (can be customized)
+  user: |
+    # USER
+
+    ## Preferences
+    - Language: 中文
+    - Timezone: UTC+8
+
+  # -- Additional custom files
+  # Key is filename, value is content
+  extraFiles: {}
+    # CUSTOM.md: |
+    #   # Custom Instructions
+    #   Add your custom instructions here
+
+# -- Extra environment variables for the main container
+# These are added directly to the container env, not from secrets
+extraEnv: []
+
+# Credentials for LLM providers and channels
+credentials:
+  # -- Anthropic API key (required if using Anthropic models)
+  anthropicApiKey: ""
+  # -- OpenAI API key (optional, for OpenAI models)
+  openaiApiKey: ""
+  # -- Gateway authentication token (auto-generated if empty)
+  gatewayToken: ""
+  # -- Extra secrets to add to the secret.yaml file as key-value pairs.
+  # These will be automatically added as environment variables.
+  # Example:
+  #   extraSecrets:
+  #     OPENROUTER_API_KEY: "sk-or-..."
+  #     TELEGRAM_API_KEY: "your-key"
+  extraSecrets: {}
+  # -- Use an existing secret instead of creating one
+  # The secret must contain keys: ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENCLAW_GATEWAY_TOKEN
+  # and any other keys defined in extraSecrets if applicable.
+  existingSecret: ""
+
+# Chromium sidecar for browser automation
+chromium:
+  # -- Enable Chromium sidecar container
+  enabled: true
+  image:
+    # -- Chromium container image repository
+    repository: zenika/alpine-chrome
+    # -- Chromium container image tag
+    tag: "124"
+    # -- Chromium image pull policy
+    pullPolicy: IfNotPresent
+  # -- Resource requests and limits for Chromium container
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  # -- Security context for Chromium container
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+
+# Persistence configuration
+persistence:
+  # -- Enable persistent storage for OpenClaw data
+  enabled: true
+  # -- Storage size
+  size: 5Gi
+  # -- Storage class (leave empty for default)
+  storageClass: ""
+  # -- Access mode
+  accessMode: ReadWriteOnce
+  # -- Annotations for the PVC
+  annotations: {}
+  # -- Use an existing PVC instead of creating one
+  # When set, the chart will not create a new PVC but use the specified one
+  # This is useful for upgrading/reinstalling while preserving data
+  existingClaim: ""
+  # -- Labels to add to PVC for identification (useful for finding PVC after uninstall)
+  labels: {}
+  # -- Reclaim policy hint (actual policy is set on PV, not PVC)
+  # Note: Set reclaimPolicy: Retain on your StorageClass or PV to prevent data loss on uninstall
+  # Example StorageClass with Retain:
+  #   apiVersion: storage.k8s.io/v1
+  #   kind: StorageClass
+  #   metadata:
+  #     name: openclaw-retain
+  #   provisioner: rancher.io/local-path
+  #   reclaimPolicy: Retain
+  reclaimPolicy: ""
+
+# Service configuration
+service:
+  # -- Service type
+  type: ClusterIP
+  # -- Gateway port (WebSocket control plane)
+  port: 18789
+  # -- Canvas port (HTTP server)
+  canvasPort: 18793
+  # -- Annotations for the service
+  annotations: {}
+
+# Ingress configuration
+ingress:
+  # -- Enable ingress
+  enabled: false
+  # -- Ingress class name
+  className: ""
+  # -- Annotations for the ingress
+  # Example for WebSocket support with nginx:
+  # nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+  # nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+  # nginx.org/websocket-services: "openclaw"
+  annotations: {}
+  # -- Ingress hosts configuration
+  hosts:
+    - host: openclaw.local
+      paths:
+        - path: /
+          pathType: Prefix
+          # -- Which service port to use (gateway or canvas)
+          servicePort: gateway
+  # -- TLS configuration
+  tls: []
+  #  - secretName: openclaw-tls
+  #    hosts:
+  #      - openclaw.local
+
+# Resource requests and limits for main OpenClaw container
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# Security context for the pod
+podSecurityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Security context for the main OpenClaw container
+securityContext:
+  runAsUser: 1000
+  runAsGroup: 1000
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false
+  seccompProfile:
+    type: RuntimeDefault
+
+# Service account configuration
+serviceAccount:
+  # -- Create a service account
+  create: true
+  # -- Service account name (auto-generated if empty)
+  name: ""
+  # -- Annotations for the service account
+  annotations: {}
+
+# -- Node selector for pod scheduling
+nodeSelector: {}
+
+# -- Tolerations for pod scheduling
+tolerations: []
+
+# -- Affinity rules for pod scheduling
+affinity: {}
+
+# -- Annotations for the pod
+podAnnotations: {}
+
+# -- Labels for the pod
+podLabels: {}
+
+# -- Revision history limit for Deployment (number of old ReplicaSets to keep)
+revisionHistoryLimit: 5
+
+# -- Extra manifests to deploy alongside the chart.
+# Can be used for Middleware, ServersTransport, or any other CRDs.
+# Example:
+#   extraManifests:
+#     - apiVersion: traefik.io/v1alpha1
+#       kind: Middleware
+#       metadata:
+#         name: redirect-https
+#       spec:
+#         redirectScheme:
+#           scheme: https
+extraManifests: []
+
+# Probes configuration
+probes:
+  # Liveness probe
+  liveness:
+    # -- Enable liveness probe
+    enabled: true
+    # -- Initial delay before probe starts
+    initialDelaySeconds: 30
+    # -- Probe interval
+    periodSeconds: 10
+    # -- Probe timeout
+    timeoutSeconds: 5
+    # -- Failure threshold
+    failureThreshold: 3
+    # -- Success threshold
+    successThreshold: 1
+  # Readiness probe
+  readiness:
+    # -- Enable readiness probe
+    enabled: true
+    # -- Initial delay before probe starts
+    initialDelaySeconds: 10
+    # -- Probe interval
+    periodSeconds: 10
+    # -- Probe timeout
+    timeoutSeconds: 5
+    # -- Failure threshold
+    failureThreshold: 3
+    # -- Success threshold
+    successThreshold: 1
+  # Startup probe
+  startup:
+    # -- Enable startup probe
+    enabled: true
+    # -- Initial delay before probe starts
+    initialDelaySeconds: 5
+    # -- Probe interval
+    periodSeconds: 5
+    # -- Probe timeout
+    timeoutSeconds: 5
+    # -- Failure threshold (allows up to 30*5=150s for startup)
+    failureThreshold: 30
+    # -- Success threshold
+    successThreshold: 1
