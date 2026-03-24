@@ -91,49 +91,227 @@ PROJECT_IDS = {
     # Add your project IDs here or use environment variables
 }
 
-# Endpoint mappings
+# ============================================================
+# 安全约束 (Security Constraints)
+# ============================================================
+# 1. 禁止将任何认证信息（AK/SK/Token/Certificate）保存到文件系统
+# 2. 禁止将认证信息保存到长期内存或持久化存储
+# 3. 所有临时证书文件在使用后必须立即删除
+# 4. 不要在日志或响应中泄露敏感信息
+# ============================================================
+
+# Project ID cache - auto-populated from IAM (只缓存project_id，不缓存密钥)
+_PROJECT_ID_CACHE = {}
+
+# 临时证书文件追踪（用于清理）
+_TEMP_CERT_FILES = set()
+
+
+def _cleanup_cert_files():
+    """清理所有临时证书文件"""
+    import os
+    global _TEMP_CERT_FILES
+    for filepath in list(_TEMP_CERT_FILES):
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+        except Exception:
+            pass
+    _TEMP_CERT_FILES.clear()
+
+
+def _register_cert_file(filepath: str):
+    """注册临时证书文件以便后续清理"""
+    global _TEMP_CERT_FILES
+    _TEMP_CERT_FILES.add(filepath)
+
+
+def _safe_delete_file(filepath: str):
+    """安全删除文件"""
+    import os
+    try:
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        global _TEMP_CERT_FILES
+        _TEMP_CERT_FILES.discard(filepath)
+    except Exception:
+        pass
+
+
+# 危险操作确认存储（用于二次确认）
+# 格式: {operation_key: {'timestamp': xxx, 'params': {...}}}
+_DANGEROUS_OP_CONFIRMATIONS = {}
+
+# 确认有效期（秒）
+_CONFIRMATION_TTL = 60
+
+
+def _generate_op_key(operation: str, cluster_id: str, namespace: str, name: str) -> str:
+    """生成操作唯一标识"""
+    return f"{operation}:{cluster_id}:{namespace}:{name}"
+
+
+def _check_confirmation(operation: str, cluster_id: str, namespace: str, name: str) -> dict:
+    """检查是否有有效的确认请求
+    
+    Returns:
+        dict: {'confirmed': bool, 'message': str, 'remaining_seconds': int}
+    """
+    import time
+    global _DANGEROUS_OP_CONFIRMATIONS
+    
+    op_key = _generate_op_key(operation, cluster_id, namespace, name)
+    
+    if op_key in _DANGEROUS_OP_CONFIRMATIONS:
+        record = _DANGEROUS_OP_CONFIRMATIONS[op_key]
+        elapsed = time.time() - record['timestamp']
+        
+        if elapsed <= _CONFIRMATION_TTL:
+            remaining = int(_CONFIRMATION_TTL - elapsed)
+            return {
+                'confirmed': True,
+                'message': f"确认有效，剩余 {remaining} 秒",
+                'remaining_seconds': remaining
+            }
+    
+    return {
+        'confirmed': False,
+        'message': "需要二次确认",
+        'remaining_seconds': 0
+    }
+
+
+def _record_confirmation_request(operation: str, cluster_id: str, namespace: str, name: str, params: dict):
+    """记录确认请求"""
+    import time
+    global _DANGEROUS_OP_CONFIRMATIONS
+    
+    op_key = _generate_op_key(operation, cluster_id, namespace, name)
+    _DANGEROUS_OP_CONFIRMATIONS[op_key] = {
+        'timestamp': time.time(),
+        'params': params
+    }
+
+
+def _clear_confirmation(operation: str, cluster_id: str, namespace: str, name: str):
+    """清除确认记录"""
+    global _DANGEROUS_OP_CONFIRMATIONS
+    op_key = _generate_op_key(operation, cluster_id, namespace, name)
+    _DANGEROUS_OP_CONFIRMATIONS.pop(op_key, None)
+
+
+# Supported Regions
+# 华为云支持的区域列表
+SUPPORTED_REGIONS = {
+    # ===== 中国大陆主要Region =====
+    "cn-north-4": {"name": "华北-北京四", "description": "核心区域，推荐"},
+    "cn-north-1": {"name": "华北-北京一", "description": "早期区域"},
+    "cn-north-9": {"name": "华北-乌兰察布一", "description": "数据中心"},
+    "cn-east-3": {"name": "华东-上海一", "description": "华东核心"},
+    "cn-east-2": {"name": "华东-上海二", "description": "核心区域"},
+    "cn-south-1": {"name": "华南-广州", "description": "华南核心"},
+    "cn-southwest-2": {"name": "西南-贵阳一", "description": "骨干数据中心"},
+    "cn-west-3": {"name": "西北-西安一", "description": "西北区域"},
+    
+    # ===== 中国香港及国际区域 =====
+    "ap-southeast-1": {"name": "中国香港", "description": "适合亚太业务"},
+    "ap-southeast-2": {"name": "亚太-曼谷", "description": "泰国节点"},
+    "ap-southeast-3": {"name": "亚太-新加坡", "description": "东南亚核心"},
+    "ap-southeast-4": {"name": "亚太-雅加达", "description": "印尼节点"},
+    "af-south-1": {"name": "非洲-约翰内斯堡", "description": "南非节点"},
+    "la-south-2": {"name": "拉美-圣地亚哥", "description": "智利节点"},
+    "la-north-2": {"name": "拉美-墨西哥城", "description": "墨西哥节点"},
+    "eu-west-0": {"name": "欧洲-巴黎", "description": "欧洲节点"},
+    "ap-northeast-1": {"name": "亚太-东京", "description": "日本节点"},
+}
+
+# Endpoint mappings - 全量区域支持
 ECS_ENDPOINTS = {
+    # 中国大陆
     "cn-north-4": "ecs.cn-north-4.myhuaweicloud.com",
+    "cn-north-1": "ecs.cn-north-1.myhuaweicloud.com",
+    "cn-north-9": "ecs.cn-north-9.myhuaweicloud.com",
     "cn-east-3": "ecs.cn-east-3.myhuaweicloud.com",
+    "cn-east-2": "ecs.cn-east-2.myhuaweicloud.com",
     "cn-south-1": "ecs.cn-south-1.myhuaweicloud.com",
+    "cn-southwest-2": "ecs.cn-southwest-2.myhuaweicloud.com",
     "cn-west-3": "ecs.cn-west-3.myhuaweicloud.com",
+    # 国际区域
     "ap-southeast-1": "ecs.ap-southeast-1.myhuaweicloud.com",
     "ap-southeast-2": "ecs.ap-southeast-2.myhuaweicloud.com",
     "ap-southeast-3": "ecs.ap-southeast-3.myhuaweicloud.com",
+    "ap-southeast-4": "ecs.ap-southeast-4.myhuaweicloud.com",
+    "af-south-1": "ecs.af-south-1.myhuaweicloud.com",
+    "la-south-2": "ecs.la-south-2.myhuaweicloud.com",
+    "la-north-2": "ecs.la-north-2.myhuaweicloud.com",
     "eu-west-0": "ecs.eu-west-0.myhuaweicloud.com",
+    "ap-northeast-1": "ecs.ap-northeast-1.myhuaweicloud.com",
 }
 
 VPC_ENDPOINTS = {
+    # 中国大陆
     "cn-north-4": "vpc.cn-north-4.myhuaweicloud.com",
+    "cn-north-1": "vpc.cn-north-1.myhuaweicloud.com",
+    "cn-north-9": "vpc.cn-north-9.myhuaweicloud.com",
     "cn-east-3": "vpc.cn-east-3.myhuaweicloud.com",
+    "cn-east-2": "vpc.cn-east-2.myhuaweicloud.com",
     "cn-south-1": "vpc.cn-south-1.myhuaweicloud.com",
+    "cn-southwest-2": "vpc.cn-southwest-2.myhuaweicloud.com",
     "cn-west-3": "vpc.cn-west-3.myhuaweicloud.com",
+    # 国际区域
     "ap-southeast-1": "vpc.ap-southeast-1.myhuaweicloud.com",
     "ap-southeast-2": "vpc.ap-southeast-2.myhuaweicloud.com",
     "ap-southeast-3": "vpc.ap-southeast-3.myhuaweicloud.com",
+    "ap-southeast-4": "vpc.ap-southeast-4.myhuaweicloud.com",
+    "af-south-1": "vpc.af-south-1.myhuaweicloud.com",
+    "la-south-2": "vpc.la-south-2.myhuaweicloud.com",
+    "la-north-2": "vpc.la-north-2.myhuaweicloud.com",
     "eu-west-0": "vpc.eu-west-0.myhuaweicloud.com",
+    "ap-northeast-1": "vpc.ap-northeast-1.myhuaweicloud.com",
 }
 
 CES_ENDPOINTS = {
+    # 中国大陆
     "cn-north-4": "ces.cn-north-4.myhuaweicloud.com",
+    "cn-north-1": "ces.cn-north-1.myhuaweicloud.com",
+    "cn-north-9": "ces.cn-north-9.myhuaweicloud.com",
     "cn-east-3": "ces.cn-east-3.myhuaweicloud.com",
+    "cn-east-2": "ces.cn-east-2.myhuaweicloud.com",
     "cn-south-1": "ces.cn-south-1.myhuaweicloud.com",
+    "cn-southwest-2": "ces.cn-southwest-2.myhuaweicloud.com",
     "cn-west-3": "ces.cn-west-3.myhuaweicloud.com",
+    # 国际区域
     "ap-southeast-1": "ces.ap-southeast-1.myhuaweicloud.com",
     "ap-southeast-2": "ces.ap-southeast-2.myhuaweicloud.com",
     "ap-southeast-3": "ces.ap-southeast-3.myhuaweicloud.com",
+    "ap-southeast-4": "ces.ap-southeast-4.myhuaweicloud.com",
+    "af-south-1": "ces.af-south-1.myhuaweicloud.com",
+    "la-south-2": "ces.la-south-2.myhuaweicloud.com",
+    "la-north-2": "ces.la-north-2.myhuaweicloud.com",
     "eu-west-0": "ces.eu-west-0.myhuaweicloud.com",
+    "ap-northeast-1": "ces.ap-northeast-1.myhuaweicloud.com",
 }
 
 CCE_ENDPOINTS = {
+    # 中国大陆
     "cn-north-4": "cce.cn-north-4.myhuaweicloud.com",
+    "cn-north-1": "cce.cn-north-1.myhuaweicloud.com",
+    "cn-north-9": "cce.cn-north-9.myhuaweicloud.com",
     "cn-east-3": "cce.cn-east-3.myhuaweicloud.com",
+    "cn-east-2": "cce.cn-east-2.myhuaweicloud.com",
     "cn-south-1": "cce.cn-south-1.myhuaweicloud.com",
+    "cn-southwest-2": "cce.cn-southwest-2.myhuaweicloud.com",
     "cn-west-3": "cce.cn-west-3.myhuaweicloud.com",
+    # 国际区域
     "ap-southeast-1": "cce.ap-southeast-1.myhuaweicloud.com",
     "ap-southeast-2": "cce.ap-southeast-2.myhuaweicloud.com",
     "ap-southeast-3": "cce.ap-southeast-3.myhuaweicloud.com",
+    "ap-southeast-4": "cce.ap-southeast-4.myhuaweicloud.com",
+    "af-south-1": "cce.af-south-1.myhuaweicloud.com",
+    "la-south-2": "cce.la-south-2.myhuaweicloud.com",
+    "la-north-2": "cce.la-north-2.myhuaweicloud.com",
     "eu-west-0": "cce.eu-west-0.myhuaweicloud.com",
+    "ap-northeast-1": "cce.ap-northeast-1.myhuaweicloud.com",
 }
 
 # IAM Endpoints (Global service)
@@ -280,17 +458,95 @@ def get_credentials(ak: Optional[str] = None, sk: Optional[str] = None, project_
     return access_key, secret_key, proj_id
 
 
+def get_project_id_for_region(region: str, ak: Optional[str] = None, sk: Optional[str] = None) -> Optional[str]:
+    """Get project ID for a specific region, auto-fetch from IAM if not cached
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+    
+    Returns:
+        Project ID string or None if not found
+    """
+    global _PROJECT_ID_CACHE
+    
+    # Check cache first
+    if region in _PROJECT_ID_CACHE:
+        return _PROJECT_ID_CACHE[region]
+    
+    # Get credentials
+    access_key, secret_key, _ = get_credentials(ak, sk, None)
+    if not access_key or not secret_key:
+        return None
+    
+    # Fetch from IAM
+    try:
+        from huaweicloudsdkiam.v3 import KeystoneListProjectsRequest
+        
+        client = create_iam_client(access_key, secret_key)
+        request = KeystoneListProjectsRequest()
+        request.name = region  # Filter by region name
+        
+        response = client.keystone_list_projects(request)
+        
+        if hasattr(response, 'projects') and response.projects:
+            for project in response.projects:
+                if project.name == region:
+                    proj_id = project.id
+                    # Cache it
+                    _PROJECT_ID_CACHE[region] = proj_id
+                    return proj_id
+        
+        # If not found with filter, try to get all and filter
+        request2 = KeystoneListProjectsRequest()
+        response2 = client.keystone_list_projects(request2)
+        
+        if hasattr(response2, 'projects') and response2.projects:
+            for project in response2.projects:
+                if project.name:
+                    _PROJECT_ID_CACHE[project.name] = project.id
+            
+            return _PROJECT_ID_CACHE.get(region)
+        
+    except Exception as e:
+        # Silently fail, return None
+        pass
+    
+    return None
+
+
+def get_credentials_with_region(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> tuple:
+    """Get credentials with automatic project_id lookup for region
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional, will auto-fetch if not provided)
+    
+    Returns:
+        Tuple of (access_key, secret_key, project_id)
+    """
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+    
+    # If no project_id provided, try to get it for the region
+    if not proj_id and region and access_key and secret_key:
+        proj_id = get_project_id_for_region(region, access_key, secret_key)
+    
+    return access_key, secret_key, proj_id
+
+
 def create_ecs_client(region: str, ak: str, sk: str, project_id: str = None):
     """Create ECS client"""
+    # Auto-fetch project_id if not provided
+    if not project_id:
+        project_id = get_project_id_for_region(region, ak, sk)
+    
     if project_id:
         credentials = BasicCredentials(ak=ak, sk=sk, project_id=project_id)
     else:
-        # Try to get project_id from mapping
-        pid = PROJECT_IDS.get(region)
-        if pid:
-            credentials = BasicCredentials(ak=ak, sk=sk, project_id=pid)
-        else:
-            credentials = BasicCredentials(ak=ak, sk=sk)
+        credentials = BasicCredentials(ak=ak, sk=sk)
 
     endpoint = ECS_ENDPOINTS.get(region, f"ecs.{region}.myhuaweicloud.com")
     return EcsClient.new_builder() \
@@ -301,14 +557,14 @@ def create_ecs_client(region: str, ak: str, sk: str, project_id: str = None):
 
 def create_vpc_client(region: str, ak: str, sk: str, project_id: str = None):
     """Create VPC client"""
+    # Auto-fetch project_id if not provided
+    if not project_id:
+        project_id = get_project_id_for_region(region, ak, sk)
+    
     if project_id:
         credentials = BasicCredentials(ak=ak, sk=sk, project_id=project_id)
     else:
-        pid = PROJECT_IDS.get(region)
-        if pid:
-            credentials = BasicCredentials(ak=ak, sk=sk, project_id=pid)
-        else:
-            credentials = BasicCredentials(ak=ak, sk=sk)
+        credentials = BasicCredentials(ak=ak, sk=sk)
 
     endpoint = VPC_ENDPOINTS.get(region, f"vpc.{region}.myhuaweicloud.com")
     return VpcClient.new_builder() \
@@ -319,14 +575,14 @@ def create_vpc_client(region: str, ak: str, sk: str, project_id: str = None):
 
 def create_ces_client(region: str, ak: str, sk: str, project_id: str = None):
     """Create CES (Cloud Eye Service) client"""
+    # Auto-fetch project_id if not provided
+    if not project_id:
+        project_id = get_project_id_for_region(region, ak, sk)
+    
     if project_id:
         credentials = BasicCredentials(ak=ak, sk=sk, project_id=project_id)
     else:
-        pid = PROJECT_IDS.get(region)
-        if pid:
-            credentials = BasicCredentials(ak=ak, sk=sk, project_id=pid)
-        else:
-            credentials = BasicCredentials(ak=ak, sk=sk)
+        credentials = BasicCredentials(ak=ak, sk=sk)
 
     endpoint = CES_ENDPOINTS.get(region, f"ces.{region}.myhuaweicloud.com")
     return CesClient.new_builder() \
@@ -337,14 +593,14 @@ def create_ces_client(region: str, ak: str, sk: str, project_id: str = None):
 
 def create_aom_client(region: str, ak: str, sk: str, project_id: str = None):
     """Create AOM (Application Operations Management) client"""
+    # Auto-fetch project_id if not provided
+    if not project_id:
+        project_id = get_project_id_for_region(region, ak, sk)
+    
     if project_id:
         credentials = BasicCredentials(ak=ak, sk=sk, project_id=project_id)
     else:
-        pid = PROJECT_IDS.get(region)
-        if pid:
-            credentials = BasicCredentials(ak=ak, sk=sk, project_id=pid)
-        else:
-            credentials = BasicCredentials(ak=ak, sk=sk)
+        credentials = BasicCredentials(ak=ak, sk=sk)
 
     endpoint = f"aom.{region}.myhuaweicloud.com"
     return AomClient.new_builder() \
@@ -358,14 +614,14 @@ def create_cce_client(region: str, ak: str, sk: str, project_id: str = None):
 
     Note: Using public CCE endpoint.
     """
+    # Auto-fetch project_id if not provided
+    if not project_id:
+        project_id = get_project_id_for_region(region, ak, sk)
+    
     if project_id:
         credentials = BasicCredentials(ak=ak, sk=sk, project_id=project_id)
     else:
-        pid = PROJECT_IDS.get(region)
-        if pid:
-            credentials = BasicCredentials(ak=ak, sk=sk, project_id=pid)
-        else:
-            credentials = BasicCredentials(ak=ak, sk=sk)
+        credentials = BasicCredentials(ak=ak, sk=sk)
 
     # Use public CCE endpoint
     endpoint = CCE_ENDPOINTS.get(region, f"cce.{region}.myhuaweicloud.com")
@@ -378,22 +634,38 @@ def create_cce_client(region: str, ak: str, sk: str, project_id: str = None):
 
 # EVS Endpoints
 EVS_ENDPOINTS = {
+    # 中国大陆
     "cn-north-4": "evs.cn-north-4.myhuaweicloud.com",
+    "cn-north-1": "evs.cn-north-1.myhuaweicloud.com",
+    "cn-north-9": "evs.cn-north-9.myhuaweicloud.com",
     "cn-east-3": "evs.cn-east-3.myhuaweicloud.com",
+    "cn-east-2": "evs.cn-east-2.myhuaweicloud.com",
     "cn-south-1": "evs.cn-south-1.myhuaweicloud.com",
+    "cn-southwest-2": "evs.cn-southwest-2.myhuaweicloud.com",
+    "cn-west-3": "evs.cn-west-3.myhuaweicloud.com",
+    # 国际区域
+    "ap-southeast-1": "evs.ap-southeast-1.myhuaweicloud.com",
+    "ap-southeast-2": "evs.ap-southeast-2.myhuaweicloud.com",
+    "ap-southeast-3": "evs.ap-southeast-3.myhuaweicloud.com",
+    "ap-southeast-4": "evs.ap-southeast-4.myhuaweicloud.com",
+    "af-south-1": "evs.af-south-1.myhuaweicloud.com",
+    "la-south-2": "evs.la-south-2.myhuaweicloud.com",
+    "la-north-2": "evs.la-north-2.myhuaweicloud.com",
+    "eu-west-0": "evs.eu-west-0.myhuaweicloud.com",
+    "ap-northeast-1": "evs.ap-northeast-1.myhuaweicloud.com",
 }
 
 
 def create_evs_client(region: str, ak: str, sk: str, project_id: str = None):
     """Create EVS (Elastic Volume Service) client"""
+    # Auto-fetch project_id if not provided
+    if not project_id:
+        project_id = get_project_id_for_region(region, ak, sk)
+    
     if project_id:
         credentials = BasicCredentials(ak=ak, sk=sk, project_id=project_id)
     else:
-        pid = PROJECT_IDS.get(region)
-        if pid:
-            credentials = BasicCredentials(ak=ak, sk=sk, project_id=pid)
-        else:
-            credentials = BasicCredentials(ak=ak, sk=sk)
+        credentials = BasicCredentials(ak=ak, sk=sk)
 
     endpoint = EVS_ENDPOINTS.get(region, f"evs.{region}.myhuaweicloud.com")
     return EvsClient.new_builder() \
@@ -404,22 +676,38 @@ def create_evs_client(region: str, ak: str, sk: str, project_id: str = None):
 
 # EIP Endpoints
 EIP_ENDPOINTS = {
+    # 中国大陆
     "cn-north-4": "vpc.cn-north-4.myhuaweicloud.com",
+    "cn-north-1": "vpc.cn-north-1.myhuaweicloud.com",
+    "cn-north-9": "vpc.cn-north-9.myhuaweicloud.com",
     "cn-east-3": "vpc.cn-east-3.myhuaweicloud.com",
+    "cn-east-2": "vpc.cn-east-2.myhuaweicloud.com",
     "cn-south-1": "vpc.cn-south-1.myhuaweicloud.com",
+    "cn-southwest-2": "vpc.cn-southwest-2.myhuaweicloud.com",
+    "cn-west-3": "vpc.cn-west-3.myhuaweicloud.com",
+    # 国际区域
+    "ap-southeast-1": "vpc.ap-southeast-1.myhuaweicloud.com",
+    "ap-southeast-2": "vpc.ap-southeast-2.myhuaweicloud.com",
+    "ap-southeast-3": "vpc.ap-southeast-3.myhuaweicloud.com",
+    "ap-southeast-4": "vpc.ap-southeast-4.myhuaweicloud.com",
+    "af-south-1": "vpc.af-south-1.myhuaweicloud.com",
+    "la-south-2": "vpc.la-south-2.myhuaweicloud.com",
+    "la-north-2": "vpc.la-north-2.myhuaweicloud.com",
+    "eu-west-0": "vpc.eu-west-0.myhuaweicloud.com",
+    "ap-northeast-1": "vpc.ap-northeast-1.myhuaweicloud.com",
 }
 
 
 def create_eip_client(region: str, ak: str, sk: str, project_id: str = None):
     """Create EIP (Elastic IP) client"""
+    # Auto-fetch project_id if not provided
+    if not project_id:
+        project_id = get_project_id_for_region(region, ak, sk)
+    
     if project_id:
         credentials = BasicCredentials(ak=ak, sk=sk, project_id=project_id)
     else:
-        pid = PROJECT_IDS.get(region)
-        if pid:
-            credentials = BasicCredentials(ak=ak, sk=sk, project_id=pid)
-        else:
-            credentials = BasicCredentials(ak=ak, sk=sk)
+        credentials = BasicCredentials(ak=ak, sk=sk)
 
     endpoint = EIP_ENDPOINTS.get(region, f"vpc.{region}.myhuaweicloud.com")
     return EipClient.new_builder() \
@@ -430,22 +718,38 @@ def create_eip_client(region: str, ak: str, sk: str, project_id: str = None):
 
 # ELB Endpoints
 ELB_ENDPOINTS = {
+    # 中国大陆
     "cn-north-4": "elb.cn-north-4.myhuaweicloud.com",
+    "cn-north-1": "elb.cn-north-1.myhuaweicloud.com",
+    "cn-north-9": "elb.cn-north-9.myhuaweicloud.com",
     "cn-east-3": "elb.cn-east-3.myhuaweicloud.com",
+    "cn-east-2": "elb.cn-east-2.myhuaweicloud.com",
     "cn-south-1": "elb.cn-south-1.myhuaweicloud.com",
+    "cn-southwest-2": "elb.cn-southwest-2.myhuaweicloud.com",
+    "cn-west-3": "elb.cn-west-3.myhuaweicloud.com",
+    # 国际区域
+    "ap-southeast-1": "elb.ap-southeast-1.myhuaweicloud.com",
+    "ap-southeast-2": "elb.ap-southeast-2.myhuaweicloud.com",
+    "ap-southeast-3": "elb.ap-southeast-3.myhuaweicloud.com",
+    "ap-southeast-4": "elb.ap-southeast-4.myhuaweicloud.com",
+    "af-south-1": "elb.af-south-1.myhuaweicloud.com",
+    "la-south-2": "elb.la-south-2.myhuaweicloud.com",
+    "la-north-2": "elb.la-north-2.myhuaweicloud.com",
+    "eu-west-0": "elb.eu-west-0.myhuaweicloud.com",
+    "ap-northeast-1": "elb.ap-northeast-1.myhuaweicloud.com",
 }
 
 
 def create_elb_client(region: str, ak: str, sk: str, project_id: str = None):
     """Create ELB (Elastic Load Balance) client"""
+    # Auto-fetch project_id if not provided
+    if not project_id:
+        project_id = get_project_id_for_region(region, ak, sk)
+    
     if project_id:
         credentials = BasicCredentials(ak=ak, sk=sk, project_id=project_id)
     else:
-        pid = PROJECT_IDS.get(region)
-        if pid:
-            credentials = BasicCredentials(ak=ak, sk=sk, project_id=pid)
-        else:
-            credentials = BasicCredentials(ak=ak, sk=sk)
+        credentials = BasicCredentials(ak=ak, sk=sk)
 
     endpoint = ELB_ENDPOINTS.get(region, f"elb.{region}.myhuaweicloud.com")
     return ElbClient.new_builder() \
@@ -466,6 +770,49 @@ def create_iam_client(ak: str, sk: str):
         .with_credentials(credentials) \
         .with_endpoint(IAM_ENDPOINT) \
         .build()
+
+
+def list_supported_regions() -> Dict[str, Any]:
+    """List all supported Huawei Cloud regions
+    
+    Returns:
+        Dict with success status and list of supported regions
+    """
+    regions = []
+    
+    # 中国大陆区域
+    china_regions = []
+    for region_id, info in SUPPORTED_REGIONS.items():
+        if region_id.startswith("cn-"):
+            china_regions.append({
+                "region_id": region_id,
+                "name": info["name"],
+                "description": info["description"]
+            })
+    
+    # 国际区域
+    international_regions = []
+    for region_id, info in SUPPORTED_REGIONS.items():
+        if not region_id.startswith("cn-"):
+            international_regions.append({
+                "region_id": region_id,
+                "name": info["name"],
+                "description": info["description"]
+            })
+    
+    return {
+        "success": True,
+        "action": "list_supported_regions",
+        "total_count": len(SUPPORTED_REGIONS),
+        "china_mainland": {
+            "count": len(china_regions),
+            "regions": china_regions
+        },
+        "international": {
+            "count": len(international_regions),
+            "regions": international_regions
+        }
+    }
 
 
 def list_elb_loadbalancers(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, limit: int = 100, marker: str = None) -> Dict[str, Any]:
@@ -497,10 +844,34 @@ def list_elb_loadbalancers(region: str, ak: Optional[str] = None, sk: Optional[s
         loadbalancers = []
         if hasattr(response, 'loadbalancers') and response.loadbalancers:
             for lb in response.loadbalancers:
+                # 获取关键字段用于判断ELB类型
+                guaranteed = getattr(lb, 'guaranteed', None)
+                provider = getattr(lb, 'provider', None)
+                lb_type = getattr(lb, 'type', None)
+                l4_flavor_id = getattr(lb, 'l4_flavor_id', None)
+                l7_flavor_id = getattr(lb, 'l7_flavor_id', None)
+                
+                # 判断ELB类型
+                # 独享型: guaranteed=True 或 provider包含vlb 或 type="Dedicated" 或 有flavor_id
+                is_dedicated = (
+                    guaranteed is True or
+                    (provider and 'vlb' in str(provider).lower()) or
+                    (lb_type and lb_type.lower() == 'dedicated') or
+                    l4_flavor_id is not None or
+                    l7_flavor_id is not None
+                )
+                
+                elb_type = "独享型" if is_dedicated else "共享型"
+                
                 lb_info = {
                     "id": lb.id,
                     "name": lb.name,
-                    "type": getattr(lb, 'type', None),  # shared or dedicated
+                    "type": lb_type,
+                    "elb_type": elb_type,  # 独享型/共享型
+                    "guaranteed": guaranteed,
+                    "provider": provider,
+                    "l4_flavor_id": l4_flavor_id,
+                    "l7_flavor_id": l7_flavor_id,
                     "provisioning_status": getattr(lb, 'provisioning_status', None),
                     "vpc_id": getattr(lb, 'vpc_id', None),
                     "vip_address": getattr(lb, 'vip_address', None),
@@ -627,13 +998,23 @@ def list_elb_listeners(region: str, loadbalancer_id: str = None, ak: Optional[st
 
 
 def get_elb_metrics(region: str, loadbalancer_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
-    """Get monitoring metrics for a specific ELB load balancer"""
+    """Get monitoring metrics for a specific ELB load balancer
+    
+    独享型ELB支持CES监控API，使用 lbaas_instance_id 维度
+    共享型（经典型）ELB不支持CES监控API
+    
+    参考: 
+    - https://support.huaweicloud.com/usermanual-elb/elb_ug_jk_0001.html
+    
+    Returns:
+        包含ELB类型信息和监控数据
+    """
     access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
 
     if not access_key or not secret_key:
         return {
             "success": False,
-            "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+            "error": "Credentials not provided"
         }
 
     if not loadbalancer_id:
@@ -649,30 +1030,91 @@ def get_elb_metrics(region: str, loadbalancer_id: str, ak: Optional[str] = None,
         }
 
     try:
+        # 首先获取 ELB 详情判断类型
+        elb_client = create_elb_client(region, access_key, secret_key, proj_id)
+        
+        elb_type = "未知"
+        is_dedicated = False
+        
+        try:
+            from huaweicloudsdkelb.v3 import ShowLoadBalancerRequest
+            show_request = ShowLoadBalancerRequest()
+            show_request.loadbalancer_id = loadbalancer_id
+            elb_detail = elb_client.show_load_balancer(show_request)
+            
+            if hasattr(elb_detail, 'loadbalancer'):
+                lb = elb_detail.loadbalancer
+                guaranteed = getattr(lb, 'guaranteed', None)
+                provider = getattr(lb, 'provider', None)
+                l4_flavor_id = getattr(lb, 'l4_flavor_id', None)
+                l7_flavor_id = getattr(lb, 'l7_flavor_id', None)
+                
+                # 判断是否独享型
+                is_dedicated = (
+                    guaranteed is True or
+                    (provider and 'vlb' in str(provider).lower()) or
+                    l4_flavor_id is not None or
+                    l7_flavor_id is not None
+                )
+                
+                elb_type = "独享型" if is_dedicated else "共享型"
+                
+        except Exception as e:
+            # 无法获取详情，尝试 CES API 判断
+            pass
+        
+        # 共享型 ELB 不支持 CES 监控
+        if not is_dedicated:
+            return {
+                "success": True,
+                "region": region,
+                "loadbalancer_id": loadbalancer_id,
+                "elb_type": "共享型（经典型）",
+                "supported": False,
+                "message": "共享型ELB不支持CES监控API",
+                "suggestion": [
+                    "请在华为云ELB控制台查看监控数据",
+                    "升级为独享型ELB以支持API监控"
+                ]
+            }
+        
+        # 独享型 ELB - 获取 CES 监控数据
         client = create_ces_client(region, access_key, secret_key, proj_id)
 
         end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
         start_time = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp() * 1000)
 
-        # ELB monitoring metrics
+        # ELB V3 监控指标 (独享型)
         metrics_to_query = [
-            "lbaas_connection_num",        # 连接数
-            "lbaas_qps",                  # QPS
-            "lbaas_in_bytes",             # 入字节速率
-            "lbaas_out_bytes",            # 出字节速率
-            "lbaas_request_num",          # 请求数
-            "lbaas_response_time",       # 响应时间
-            "lbaas_health_check_ratio",   # 健康检查率
+            # 连接相关
+            ("m1_cps", "并发连接数"),
+            ("m2_act_conn", "活跃连接数"),
+            ("m4_ncps", "新建连接数"),
+            # 带宽相关
+            ("m22_in_bandwidth", "入网带宽"),
+            ("m23_out_bandwidth", "出网带宽"),
+            # QPS (7层)
+            ("mb_l7_qps", "7层查询速率"),
+            # 使用率指标 (关键!)
+            ("l7_con_usage", "7层并发连接使用率"),
+            ("l7_in_bps_usage", "7层入带宽使用率"),
+            ("l4_con_usage", "4层并发连接使用率"),
+            ("l4_in_bps_usage", "4层入带宽使用率"),
+            # 后端服务器状态
+            ("m9_abnormal_servers", "异常主机数"),
+            ("ma_normal_servers", "正常主机数"),
         ]
 
         all_metrics = {}
-
-        for metric_name in metrics_to_query:
+        success_metrics = 0
+        
+        # 独享型维度
+        for metric_name, display_name in metrics_to_query:
             try:
                 request = ShowMetricDataRequest()
                 request.namespace = "SYS.ELB"
                 request.metric_name = metric_name
-                request.dim_0 = f"loadbalancer_id,{loadbalancer_id}"
+                request.dim_0 = f"lbaas_instance_id,{loadbalancer_id}"
                 request._from = start_time
                 request.to = end_time
                 request.period = 60
@@ -692,25 +1134,53 @@ def get_elb_metrics(region: str, loadbalancer_id: str, ak: Optional[str] = None,
                         })
                     latest = datapoints[-1] if datapoints else None
                     all_metrics[metric_name] = {
+                        "display_name": display_name,
                         "datapoints": datapoints,
                         "latest_value": latest.get('average') if latest else None,
                         "unit": latest.get('unit', '') if latest else ''
                     }
+                    if latest and latest.get('average') is not None:
+                        success_metrics += 1
                 else:
-                    all_metrics[metric_name] = {"datapoints": [], "note": "No data available"}
+                    all_metrics[metric_name] = {
+                        "display_name": display_name,
+                        "datapoints": [],
+                        "latest_value": None
+                    }
 
             except Exception as e:
-                all_metrics[metric_name] = {"error": str(e)}
+                error_msg = str(e)
+                all_metrics[metric_name] = {
+                    "display_name": display_name,
+                    "error": error_msg[:200] if len(error_msg) > 200 else error_msg
+                }
 
+        # 提取关键指标摘要
+        summary = {
+            "connection_num": all_metrics.get("m1_cps", {}).get("latest_value"),
+            "in_bandwidth_bps": all_metrics.get("m22_in_bandwidth", {}).get("latest_value"),
+            "l7_qps": all_metrics.get("mb_l7_qps", {}).get("latest_value"),
+            "l7_connection_usage_percent": all_metrics.get("l7_con_usage", {}).get("latest_value"),
+            "l7_bandwidth_usage_percent": all_metrics.get("l7_in_bps_usage", {}).get("latest_value"),
+            "l4_connection_usage_percent": all_metrics.get("l4_con_usage", {}).get("latest_value"),
+            "l4_bandwidth_usage_percent": all_metrics.get("l4_in_bps_usage", {}).get("latest_value"),
+            "abnormal_servers": all_metrics.get("m9_abnormal_servers", {}).get("latest_value"),
+            "normal_servers": all_metrics.get("ma_normal_servers", {}).get("latest_value"),
+        }
+        
         return {
             "success": True,
             "region": region,
             "loadbalancer_id": loadbalancer_id,
+            "elb_type": "独享型",
+            "supported": True,
+            "metrics_success_count": success_metrics,
             "time_range": {
                 "start": datetime.fromtimestamp(start_time/1000, timezone.utc).isoformat(),
                 "end": datetime.fromtimestamp(end_time/1000, timezone.utc).isoformat(),
                 "period": "1min"
             },
+            "summary": summary,
             "metrics": all_metrics
         }
 
@@ -961,7 +1431,8 @@ def list_vpc_acls(region: str, vpc_id: str = None, ak: Optional[str] = None, sk:
 
 def list_eip_addresses(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
     """List EIP (Elastic IP) addresses in the specified region"""
-    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+    # Auto-fetch project_id if not provided
+    access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
 
     if not access_key or not secret_key:
         return {
@@ -969,13 +1440,10 @@ def list_eip_addresses(region: str, ak: Optional[str] = None, sk: Optional[str] 
             "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
         }
 
-    if not project_id:
-        project_id = proj_id
-
-    if not project_id:
+    if not proj_id:
         return {
             "success": False,
-            "error": "project_id is required"
+            "error": "Project ID not found. Please provide project_id parameter or ensure the account has access to the region."
         }
 
     if not SDK_AVAILABLE:
@@ -986,7 +1454,7 @@ def list_eip_addresses(region: str, ak: Optional[str] = None, sk: Optional[str] 
 
     try:
         # 使用EIP SDK获取EIP列表
-        client = create_eip_client(region, access_key, secret_key, project_id)
+        client = create_eip_client(region, access_key, secret_key, proj_id)
 
         request = ListPublicipsRequest()
         request.limit = str(limit)
@@ -1058,7 +1526,10 @@ def list_eip_addresses(region: str, ak: Optional[str] = None, sk: Optional[str] 
 
 
 def get_eip_metrics(region: str, eip_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
-    """Get monitoring metrics for a specific EIP"""
+    """Get monitoring metrics for a specific EIP
+    
+    包括带宽使用率指标，用于检查是否存在带宽超限情况。
+    """
     access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
 
     if not access_key or not secret_key:
@@ -1085,16 +1556,22 @@ def get_eip_metrics(region: str, eip_id: str, ak: Optional[str] = None, sk: Opti
         end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
         start_time = int((datetime.now(timezone.utc) - timedelta(hours=1)).timestamp() * 1000)
 
-        # EIP monitoring metrics
+        # EIP V3 监控指标
+        # 格式: (指标名, 显示名)
         metrics_to_query = [
-            "eip_in_bytes",        # 入流量 (B)
-            "eip_out_bytes",       # 出流量 (B)
-            "eip_connection_num", # 连接数
+            # 流量相关
+            ("eip_in_bytes", "入流量"),
+            ("eip_out_bytes", "出流量"),
+            # 连接数
+            ("eip_connection_num", "连接数"),
+            # 带宽使用率 ⭐ 关键指标
+            ("bw_usage_in", "入网带宽使用率"),    # %
+            ("bw_usage_out", "出网带宽使用率"),   # %
         ]
 
         all_metrics = {}
 
-        for metric_name in metrics_to_query:
+        for metric_name, display_name in metrics_to_query:
             try:
                 request = ShowMetricDataRequest()
                 request.namespace = "SYS.ELB"  # EIP uses ELB namespace
@@ -1119,15 +1596,33 @@ def get_eip_metrics(region: str, eip_id: str, ak: Optional[str] = None, sk: Opti
                         })
                     latest = datapoints[-1] if datapoints else None
                     all_metrics[metric_name] = {
+                        "display_name": display_name,
                         "datapoints": datapoints,
                         "latest_value": latest.get('average') if latest else None,
                         "unit": latest.get('unit', '') if latest else ''
                     }
                 else:
-                    all_metrics[metric_name] = {"datapoints": [], "note": "No data available"}
+                    all_metrics[metric_name] = {
+                        "display_name": display_name,
+                        "datapoints": [],
+                        "latest_value": None,
+                        "note": "No data available"
+                    }
 
             except Exception as e:
-                all_metrics[metric_name] = {"error": str(e)}
+                all_metrics[metric_name] = {
+                    "display_name": display_name,
+                    "error": str(e)[:200]
+                }
+
+        # 提取关键指标摘要
+        summary = {
+            "in_bytes": all_metrics.get("eip_in_bytes", {}).get("latest_value"),
+            "out_bytes": all_metrics.get("eip_out_bytes", {}).get("latest_value"),
+            "connection_num": all_metrics.get("eip_connection_num", {}).get("latest_value"),
+            "bw_usage_in_percent": all_metrics.get("bw_usage_in", {}).get("latest_value"),
+            "bw_usage_out_percent": all_metrics.get("bw_usage_out", {}).get("latest_value"),
+        }
 
         return {
             "success": True,
@@ -1138,6 +1633,7 @@ def get_eip_metrics(region: str, eip_id: str, ak: Optional[str] = None, sk: Opti
                 "end": datetime.fromtimestamp(end_time/1000, timezone.utc).isoformat(),
                 "period": "1min"
             },
+            "summary": summary,
             "metrics": all_metrics
         }
 
@@ -2039,6 +2535,101 @@ def list_cce_node_pools(region: str, cluster_id: str, ak: Optional[str] = None, 
         }
 
 
+def get_cce_kubeconfig(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, duration: int = 30) -> Dict[str, Any]:
+    """Get kubeconfig for a CCE cluster
+
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        cluster_id: CCE cluster ID
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+        duration: Certificate validity duration in days (default: 30)
+
+    Returns:
+        Dictionary with kubeconfig content
+    """
+    # Auto-fetch project_id if not provided
+    access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {
+            "success": False,
+            "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+        }
+
+    if not proj_id:
+        return {
+            "success": False,
+            "error": "Project ID not found. Please provide project_id parameter."
+        }
+
+    if not cluster_id:
+        return {
+            "success": False,
+            "error": "cluster_id is required"
+        }
+
+    if not SDK_AVAILABLE:
+        return {
+            "success": False,
+            "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"
+        }
+
+    try:
+        from huaweicloudsdkcce.v3 import CreateKubernetesClusterCertRequest, ClusterCertDuration
+        
+        client = create_cce_client(region, access_key, secret_key, proj_id)
+        
+        # Create certificate request
+        cert_duration = ClusterCertDuration(duration=duration)
+        request = CreateKubernetesClusterCertRequest(cluster_id=cluster_id)
+        request.body = cert_duration
+        
+        response = client.create_kubernetes_cluster_cert(request)
+        
+        result = {
+            "success": True,
+            "region": region,
+            "cluster_id": cluster_id,
+            "action": "get_cce_kubeconfig",
+            "duration_days": duration,
+        }
+        
+        # Parse response
+        if hasattr(response, 'to_dict'):
+            resp_dict = response.to_dict()
+            
+            # Extract kubeconfig
+            result["kubeconfig"] = resp_dict
+            
+            # Extract key information
+            if 'clusters' in resp_dict:
+                result["cluster_endpoints"] = []
+                for cluster in resp_dict['clusters']:
+                    endpoint_info = {
+                        "name": cluster.get('name'),
+                        "server": cluster.get('cluster', {}).get('server')
+                    }
+                    result["cluster_endpoints"].append(endpoint_info)
+            
+            if 'current_context' in resp_dict:
+                result["current_context"] = resp_dict['current_context']
+            
+            # Generate YAML format kubeconfig
+            import yaml
+            result["kubeconfig_yaml"] = yaml.dump(resp_dict, default_flow_style=False, allow_unicode=True)
+        
+        return result
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
 def list_cce_addons(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
     """List addons (plugins) in a CCE cluster
 
@@ -2118,18 +2709,19 @@ def list_cce_addons(region: str, cluster_id: str, ak: Optional[str] = None, sk: 
         }
 
 
-def list_aom_instances(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, prom_type: Optional[str] = None) -> Dict[str, Any]:
-    """List AOM Prometheus instances and their details
-
+def get_cce_addon_detail(region: str, cluster_id: str, addon_name: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+    """Get detailed information of a specific CCE addon
+    
     Args:
         region: Huawei Cloud region (e.g., cn-north-4)
+        cluster_id: CCE cluster ID
+        addon_name: Addon name (e.g., 'cie-collector')
         ak: Access Key ID (optional)
         sk: Secret Access Key (optional)
         project_id: Project ID (optional)
-        prom_type: Filter by Prometheus type (optional) - CCE, APPLICATION, default
-
+    
     Returns:
-        Dictionary with AOM Prometheus instances details including endpoints
+        Dictionary with addon detailed information including custom parameters
     """
     access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
 
@@ -2137,6 +2729,120 @@ def list_aom_instances(region: str, ak: Optional[str] = None, sk: Optional[str] 
         return {
             "success": False,
             "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+        }
+
+    if not cluster_id:
+        return {
+            "success": False,
+            "error": "cluster_id is required"
+        }
+
+    if not SDK_AVAILABLE:
+        return {
+            "success": False,
+            "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"
+        }
+
+    try:
+        client = create_cce_client(region, access_key, secret_key, proj_id)
+
+        from huaweicloudsdkcce.v3 import ShowAddonRequest
+        request = ShowAddonRequest()
+        request.cluster_id = cluster_id
+        request.addon_name = addon_name
+
+        response = client.show_addon(request)
+
+        addon_info = {}
+        if hasattr(response, 'spec') and response.spec:
+            spec = response.spec
+            addon_info["name"] = getattr(spec, 'name', None)
+            addon_info["version"] = getattr(spec, 'version', None)
+            addon_info["status"] = getattr(spec, 'status', None)
+            addon_info["description"] = getattr(spec, 'description', None)
+            
+            # 获取自定义参数
+            if hasattr(spec, 'custom') and spec.custom:
+                custom = spec.custom
+                addon_info["custom_params"] = {}
+                
+                # 尝试获取各种配置参数
+                if hasattr(custom, 'aom_id'):
+                    addon_info["custom_params"]["aom_id"] = custom.aom_id
+                if hasattr(custom, 'aom_instance_id'):
+                    addon_info["custom_params"]["aom_instance_id"] = custom.aom_instance_id
+                if hasattr(custom, 'prom_instance_id'):
+                    addon_info["custom_params"]["prom_instance_id"] = custom.prom_instance_id
+                if hasattr(custom, 'remote_write_url'):
+                    addon_info["custom_params"]["remote_write_url"] = custom.remote_write_url
+                if hasattr(custom, 'remote_read_url'):
+                    addon_info["custom_params"]["remote_read_url"] = custom.remote_read_url
+                
+                # 如果custom是字典类型
+                if isinstance(custom, dict):
+                    addon_info["custom_params"] = custom
+                    # 提取关键字段
+                    if 'aom_id' in custom:
+                        addon_info["aom_id"] = custom['aom_id']
+                    if 'aom_instance_id' in custom:
+                        addon_info["aom_instance_id"] = custom['aom_instance_id']
+                    if 'prom_instance_id' in custom:
+                        addon_info["aom_instance_id"] = custom['prom_instance_id']
+        
+        # 从metadata获取信息
+        if hasattr(response, 'metadata') and response.metadata:
+            metadata = response.metadata
+            addon_info["uid"] = getattr(metadata, 'uid', None)
+            addon_info["creation_timestamp"] = str(getattr(metadata, 'creation_timestamp', None))
+
+        return {
+            "success": True,
+            "region": region,
+            "cluster_id": cluster_id,
+            "action": "get_cce_addon_detail",
+            "addon": addon_info
+        }
+
+    except ClientRequestException as e:
+        return {
+            "success": False,
+            "error": f"{e.error_code} - {e.error_msg}",
+            "request_id": getattr(e, 'request_id', None)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
+def list_aom_instances(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, prom_type: Optional[str] = None) -> Dict[str, Any]:
+    """List AOM Prometheus instances and their details
+
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional, will auto-fetch if not provided)
+        prom_type: Filter by Prometheus type (optional) - CCE, APPLICATION, default
+
+    Returns:
+        Dictionary with AOM Prometheus instances details including endpoints
+    """
+    # Auto-fetch project_id if not provided
+    access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {
+            "success": False,
+            "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+        }
+    
+    if not proj_id:
+        return {
+            "success": False,
+            "error": "Project ID not found. Please provide project_id parameter or ensure the account has access to the region."
         }
 
     if not AOM_AVAILABLE:
@@ -2148,11 +2854,7 @@ def list_aom_instances(region: str, ak: Optional[str] = None, sk: Optional[str] 
     try:
         from huaweicloudsdkaom.v2 import AomClient, ListPromInstanceRequest
 
-        credentials = BasicCredentials(ak=access_key, sk=secret_key, project_id=proj_id)
-        client = AomClient.new_builder() \
-            .with_credentials(credentials) \
-            .with_endpoint(f"aom.{region}.myhuaweicloud.com") \
-            .build()
+        client = create_aom_client(region, access_key, secret_key, proj_id)
 
         request = ListPromInstanceRequest()
         request.limit = 50
@@ -2211,14 +2913,19 @@ def list_aom_instances(region: str, ak: Optional[str] = None, sk: Optional[str] 
         }
 
 
-def resize_node_pool(region: str, cluster_id: str, nodepool_id: str, node_count: int, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+def resize_node_pool(region: str, cluster_id: str, nodepool_id: str, node_count: int, confirm: bool = False, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
     """Resize (scale up or down) a CCE node pool to the specified number of nodes
+
+    ⚠️ 二次确认机制：
+    - 第一步：不带 confirm 参数调用，返回确认提示
+    - 第二步：带 confirm=true 再次调用，执行操作
 
     Args:
         region: Huawei Cloud region (e.g., cn-north-4)
         cluster_id: CCE cluster ID
         nodepool_id: Node pool ID to resize
         node_count: Target node count (desired number of nodes)
+        confirm: True to confirm and execute (default: False)
         ak: Access Key ID (optional)
         sk: Secret Access Key (optional)
         project_id: Project ID (optional)
@@ -2250,6 +2957,21 @@ def resize_node_pool(region: str, cluster_id: str, nodepool_id: str, node_count:
         return {
             "success": False,
             "error": "node_count must be a non-negative integer"
+        }
+
+    # ========== 二次确认机制 ==========
+    if not confirm:
+        return {
+            "success": False,
+            "requires_confirmation": True,
+            "operation": "resize_nodepool",
+            "warning": f"⚠️ 危险操作：即将调整节点池 '{nodepool_id}' 的节点数为 {node_count}",
+            "cluster_id": cluster_id,
+            "nodepool_id": nodepool_id,
+            "target_node_count": node_count,
+            "hint": "确认操作请添加 confirm=true 参数",
+            "note": "⚠️ 此操作会影响集群资源和计费！",
+            "example": f"resize_node_pool region={region} cluster_id={cluster_id} nodepool_id={nodepool_id} node_count={node_count} confirm=true"
         }
 
     if not SDK_AVAILABLE:
@@ -2413,7 +3135,7 @@ def list_evs_volumes(region: str, ak: Optional[str] = None, sk: Optional[str] = 
         }
 
 
-def get_cce_cluster_pods(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None) -> Dict[str, Any]:
+def get_kubernetes_pods(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None) -> Dict[str, Any]:
     """Get pods in a CCE cluster"""
     access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
 
@@ -2448,7 +3170,7 @@ def get_cce_cluster_pods(region: str, cluster_id: str, ak: Optional[str] = None,
         cert_request = CreateKubernetesClusterCertRequest()
         cert_request.cluster_id = cluster_id
         body = ClusterCertDuration()
-        body.duration = 365
+        body.duration = 1
         cert_request.body = body
 
         cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
@@ -2495,6 +3217,10 @@ def get_cce_cluster_pods(region: str, cluster_id: str, ak: Optional[str] = None,
                 f.write(base64.b64decode(user_data['client_key_data']))
             configuration.key_file = key_file
 
+        # 注册临时证书文件以便后续清理
+        _register_cert_file(cert_file)
+        _register_cert_file(key_file)
+
         # Set default configuration and get pods
         k8s_client.Configuration.set_default(configuration)
         v1 = k8s_client.CoreV1Api()
@@ -2530,6 +3256,10 @@ def get_cce_cluster_pods(region: str, cluster_id: str, ak: Optional[str] = None,
                 pod_info["containers"] = containers
             pod_list.append(pod_info)
 
+        # 清理临时证书文件
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
+
         return {
             "success": True,
             "region": region,
@@ -2548,7 +3278,7 @@ def get_cce_cluster_pods(region: str, cluster_id: str, ak: Optional[str] = None,
         }
 
 
-def get_cce_cluster_namespaces(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+def get_kubernetes_namespaces(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
     """Get namespaces in a CCE cluster"""
     access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
 
@@ -2583,7 +3313,7 @@ def get_cce_cluster_namespaces(region: str, cluster_id: str, ak: Optional[str] =
         cert_request = CreateKubernetesClusterCertRequest()
         cert_request.cluster_id = cluster_id
         body = ClusterCertDuration()
-        body.duration = 365
+        body.duration = 1
         cert_request.body = body
 
         cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
@@ -2629,6 +3359,10 @@ def get_cce_cluster_namespaces(region: str, cluster_id: str, ak: Optional[str] =
                 f.write(base64.b64decode(user_data['client_key_data']))
             configuration.key_file = key_file
 
+        # 注册临时证书文件以便后续清理
+        _register_cert_file(cert_file)
+        _register_cert_file(key_file)
+
         # Set default configuration and get namespaces
         k8s_client.Configuration.set_default(configuration)
         v1 = k8s_client.CoreV1Api()
@@ -2646,6 +3380,9 @@ def get_cce_cluster_namespaces(region: str, cluster_id: str, ak: Optional[str] =
             }
             ns_list.append(ns_info)
 
+        # 清理临时证书文件
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
         return {
             "success": True,
             "region": region,
@@ -2655,6 +3392,8 @@ def get_cce_cluster_namespaces(region: str, cluster_id: str, ak: Optional[str] =
             "namespaces": ns_list
         }
 
+        
+
     except Exception as e:
         return {
             "success": False,
@@ -2663,7 +3402,7 @@ def get_cce_cluster_namespaces(region: str, cluster_id: str, ak: Optional[str] =
         }
 
 
-def get_cce_cluster_deployments(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None) -> Dict[str, Any]:
+def get_kubernetes_deployments(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None) -> Dict[str, Any]:
     """Get deployments in a CCE cluster"""
     access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
 
@@ -2698,7 +3437,7 @@ def get_cce_cluster_deployments(region: str, cluster_id: str, ak: Optional[str] 
         cert_request = CreateKubernetesClusterCertRequest()
         cert_request.cluster_id = cluster_id
         body = ClusterCertDuration()
-        body.duration = 365
+        body.duration = 1
         cert_request.body = body
 
         cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
@@ -2744,6 +3483,10 @@ def get_cce_cluster_deployments(region: str, cluster_id: str, ak: Optional[str] 
                 f.write(base64.b64decode(user_data['client_key_data']))
             configuration.key_file = key_file
 
+        # 注册临时证书文件以便后续清理
+        _register_cert_file(cert_file)
+        _register_cert_file(key_file)
+
         # Set default configuration and get deployments
         k8s_client.Configuration.set_default(configuration)
         apps_v1 = k8s_client.AppsV1Api()
@@ -2771,6 +3514,9 @@ def get_cce_cluster_deployments(region: str, cluster_id: str, ak: Optional[str] 
                 dep_info["strategy"] = dep.spec.strategy.type if dep.spec.strategy else None
             dep_list.append(dep_info)
 
+        # 清理临时证书文件
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
         return {
             "success": True,
             "region": region,
@@ -2780,6 +3526,8 @@ def get_cce_cluster_deployments(region: str, cluster_id: str, ak: Optional[str] 
             "count": len(dep_list),
             "deployments": dep_list
         }
+
+        
 
     except Exception as e:
         return {
@@ -2792,7 +3540,16 @@ def get_cce_cluster_deployments(region: str, cluster_id: str, ak: Optional[str] 
 def scale_cce_workload(region: str, cluster_id: str, workload_type: str, name: str, namespace: str, replicas: int, confirm: bool = False, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
     """Scale a CCE workload (Deployment or StatefulSet) to the specified number of replicas
 
-    IMPORTANT: User confirmation is required before scaling.
+    ⚠️ 二次确认机制：
+    - 第一步：不带 confirm 参数调用，返回确认提示
+    - 第二步：带 confirm=true 再次调用，执行操作
+    
+    Example:
+        # 第一步：预览操作
+        scale_cce_workload region=xxx cluster_id=xxx workload_type=deployment name=my-app namespace=default replicas=3
+        
+        # 第二步：确认执行
+        scale_cce_workload region=xxx cluster_id=xxx workload_type=deployment name=my-app namespace=default replicas=3 confirm=true
 
     Args:
         region: Huawei Cloud region (e.g., cn-north-4)
@@ -2801,7 +3558,7 @@ def scale_cce_workload(region: str, cluster_id: str, workload_type: str, name: s
         name: Name of the workload
         namespace: Kubernetes namespace
         replicas: Target number of replicas
-        confirm: Must be set to True to confirm scaling (required)
+        confirm: True to confirm and execute (default: False)
         ak: Access Key ID (optional)
         sk: Secret Access Key (optional)
         project_id: Project ID (optional)
@@ -2841,13 +3598,21 @@ def scale_cce_workload(region: str, cluster_id: str, workload_type: str, name: s
             "error": "replicas must be a non-negative integer"
         }
 
-    # Require explicit confirmation
+    # ========== 二次确认机制 ==========
     if not confirm:
+        # 第一步：返回确认提示
         return {
             "success": False,
-            "error": "Scaling not confirmed. To scale the workload, please set confirm=true parameter.",
-            "warning": f"This operation will scale the {workload_type} '{name}' in namespace '{namespace}' to {replicas} replicas. Are you sure?",
-            "hint": "Add confirm=true parameter to confirm scaling. Example: scale_cce_workload region=cn-north-4 cluster_id=xxx workload_type=deployment name=my-app namespace=default replicas=3 confirm=true"
+            "requires_confirmation": True,
+            "operation": "scale_workload",
+            "warning": f"⚠️ 危险操作：即将修改 {workload_type} '{name}' (命名空间: {namespace}) 的副本数为 {replicas}",
+            "cluster_id": cluster_id,
+            "namespace": namespace,
+            "name": name,
+            "workload_type": workload_type,
+            "target_replicas": replicas,
+            "hint": "确认操作请添加 confirm=true 参数",
+            "example": f"scale_cce_workload region={region} cluster_id={cluster_id} workload_type={workload_type} name={name} namespace={namespace} replicas={replicas} confirm=true"
         }
 
     if not K8S_AVAILABLE:
@@ -2869,7 +3634,7 @@ def scale_cce_workload(region: str, cluster_id: str, workload_type: str, name: s
         cert_request = CreateKubernetesClusterCertRequest()
         cert_request.cluster_id = cluster_id
         body = ClusterCertDuration()
-        body.duration = 365
+        body.duration = 1
         cert_request.body = body
 
         cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
@@ -2914,6 +3679,10 @@ def scale_cce_workload(region: str, cluster_id: str, workload_type: str, name: s
             with open(key_file, 'wb') as f:
                 f.write(base64.b64decode(user_data['client_key_data']))
             configuration.key_file = key_file
+
+        # 注册临时证书文件以便后续清理
+        _register_cert_file(cert_file)
+        _register_cert_file(key_file)
 
         # Set default configuration
         k8s_client.Configuration.set_default(configuration)
@@ -2965,6 +3734,10 @@ def scale_cce_workload(region: str, cluster_id: str, workload_type: str, name: s
                 "message": f"StatefulSet '{name}' scaled from {old_replicas} to {replicas} replicas"
             }
 
+        # 清理临时证书文件
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
+
     except Exception as e:
         return {
             "success": False,
@@ -2976,8 +3749,18 @@ def scale_cce_workload(region: str, cluster_id: str, workload_type: str, name: s
 def delete_cce_workload(region: str, cluster_id: str, workload_type: str, name: str, namespace: str, confirm: bool = False, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
     """Delete a CCE workload (Deployment or StatefulSet)
 
-    IMPORTANT: This operation will delete the workload and all its pods.
-    User confirmation is required before deletion.
+    ⚠️ 二次确认机制：
+    - 第一步：不带 confirm 参数调用，返回确认提示
+    - 第二步：带 confirm=true 再次调用，执行操作
+    
+    WARNING: 此操作将删除工作负载及其所有 Pod，不可恢复！
+
+    Example:
+        # 第一步：预览操作
+        delete_cce_workload region=xxx cluster_id=xxx workload_type=deployment name=my-app namespace=default
+        
+        # 第二步：确认执行
+        delete_cce_workload region=xxx cluster_id=xxx workload_type=deployment name=my-app namespace=default confirm=true
 
     Args:
         region: Huawei Cloud region (e.g., cn-north-4)
@@ -2985,7 +3768,7 @@ def delete_cce_workload(region: str, cluster_id: str, workload_type: str, name: 
         workload_type: Type of workload - 'deployment' or 'statefulset'
         name: Name of the workload to delete
         namespace: Kubernetes namespace
-        confirm: Must be set to True to confirm deletion (required)
+        confirm: True to confirm and execute (default: False)
         ak: Access Key ID (optional)
         sk: Secret Access Key (optional)
         project_id: Project ID (optional)
@@ -3019,13 +3802,21 @@ def delete_cce_workload(region: str, cluster_id: str, workload_type: str, name: 
             "error": "workload_type must be 'deployment' or 'statefulset'"
         }
 
-    # Require explicit confirmation
+    # ========== 二次确认机制 ==========
     if not confirm:
+        # 第一步：返回确认提示
         return {
             "success": False,
-            "error": "Deletion not confirmed. To delete the workload, please set confirm=true parameter.",
-            "warning": f"This operation will delete the {workload_type} '{name}' in namespace '{namespace}' and all its pods. Are you sure?",
-            "hint": "Add confirm=true parameter to confirm deletion. Example: delete_cce_workload region=cn-north-4 cluster_id=xxx workload_type=deployment name=my-app namespace=default confirm=true"
+            "requires_confirmation": True,
+            "operation": "delete_workload",
+            "warning": f"⚠️ 危险操作：即将删除 {workload_type} '{name}' (命名空间: {namespace}) 及其所有 Pod",
+            "cluster_id": cluster_id,
+            "namespace": namespace,
+            "name": name,
+            "workload_type": workload_type,
+            "hint": "确认操作请添加 confirm=true 参数",
+            "note": "⚠️ 此操作不可恢复！",
+            "example": f"delete_cce_workload region={region} cluster_id={cluster_id} workload_type={workload_type} name={name} namespace={namespace} confirm=true"
         }
 
     if not K8S_AVAILABLE:
@@ -3047,7 +3838,7 @@ def delete_cce_workload(region: str, cluster_id: str, workload_type: str, name: 
         cert_request = CreateKubernetesClusterCertRequest()
         cert_request.cluster_id = cluster_id
         body = ClusterCertDuration()
-        body.duration = 365
+        body.duration = 1
         cert_request.body = body
 
         cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
@@ -3093,6 +3884,10 @@ def delete_cce_workload(region: str, cluster_id: str, workload_type: str, name: 
                 f.write(base64.b64decode(user_data['client_key_data']))
             configuration.key_file = key_file
 
+        # 注册临时证书文件以便后续清理
+        _register_cert_file(cert_file)
+        _register_cert_file(key_file)
+
         # Set default configuration
         k8s_client.Configuration.set_default(configuration)
 
@@ -3127,6 +3922,10 @@ def delete_cce_workload(region: str, cluster_id: str, workload_type: str, name: 
                 "message": f"StatefulSet '{name}' in namespace '{namespace}' deleted successfully"
             }
 
+        # 清理临时证书文件
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
+
     except Exception as e:
         return {
             "success": False,
@@ -3135,7 +3934,7 @@ def delete_cce_workload(region: str, cluster_id: str, workload_type: str, name: 
         }
 
 
-def get_cce_cluster_nodes(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+def get_kubernetes_nodes(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
     """Get nodes in a CCE cluster"""
     access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
 
@@ -3170,7 +3969,7 @@ def get_cce_cluster_nodes(region: str, cluster_id: str, ak: Optional[str] = None
         cert_request = CreateKubernetesClusterCertRequest()
         cert_request.cluster_id = cluster_id
         body = ClusterCertDuration()
-        body.duration = 365
+        body.duration = 1
         cert_request.body = body
 
         cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
@@ -3215,6 +4014,10 @@ def get_cce_cluster_nodes(region: str, cluster_id: str, ak: Optional[str] = None
             with open(key_file, 'wb') as f:
                 f.write(base64.b64decode(user_data['client_key_data']))
             configuration.key_file = key_file
+
+        # 注册临时证书文件以便后续清理
+        _register_cert_file(cert_file)
+        _register_cert_file(key_file)
 
         # Set default configuration and get nodes
         k8s_client.Configuration.set_default(configuration)
@@ -3278,6 +4081,9 @@ def get_cce_cluster_nodes(region: str, cluster_id: str, ak: Optional[str] = None
 
             node_list.append(node_info)
 
+        # 清理临时证书文件
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
         return {
             "success": True,
             "region": region,
@@ -3287,6 +4093,8 @@ def get_cce_cluster_nodes(region: str, cluster_id: str, ak: Optional[str] = None
             "nodes": node_list
         }
 
+        
+
     except Exception as e:
         return {
             "success": False,
@@ -3295,7 +4103,7 @@ def get_cce_cluster_nodes(region: str, cluster_id: str, ak: Optional[str] = None
         }
 
 
-def get_cce_cluster_events(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None, limit: int = 500) -> Dict[str, Any]:
+def get_kubernetes_events(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None, limit: int = 500) -> Dict[str, Any]:
     """Get events in a CCE cluster with pagination support"""
     access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
 
@@ -3330,7 +4138,7 @@ def get_cce_cluster_events(region: str, cluster_id: str, ak: Optional[str] = Non
         cert_request = CreateKubernetesClusterCertRequest()
         cert_request.cluster_id = cluster_id
         body = ClusterCertDuration()
-        body.duration = 365
+        body.duration = 1
         cert_request.body = body
 
         cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
@@ -3375,6 +4183,10 @@ def get_cce_cluster_events(region: str, cluster_id: str, ak: Optional[str] = Non
             with open(key_file, 'wb') as f:
                 f.write(base64.b64decode(user_data['client_key_data']))
             configuration.key_file = key_file
+
+        # 注册临时证书文件以便后续清理
+        _register_cert_file(cert_file)
+        _register_cert_file(key_file)
 
         # Set default configuration and get events
         k8s_client.Configuration.set_default(configuration)
@@ -3422,6 +4234,10 @@ def get_cce_cluster_events(region: str, cluster_id: str, ak: Optional[str] = Non
             else:
                 break
 
+        # 清理临时证书文件
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
+
         return {
             "success": True,
             "region": region,
@@ -3441,7 +4257,7 @@ def get_cce_cluster_events(region: str, cluster_id: str, ak: Optional[str] = Non
         }
 
 
-def get_cce_cluster_pvcs(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None) -> Dict[str, Any]:
+def get_kubernetes_pvcs(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None) -> Dict[str, Any]:
     """Get PVCs (PersistentVolumeClaims) in a CCE cluster"""
     access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
 
@@ -3476,7 +4292,7 @@ def get_cce_cluster_pvcs(region: str, cluster_id: str, ak: Optional[str] = None,
         cert_request = CreateKubernetesClusterCertRequest()
         cert_request.cluster_id = cluster_id
         body = ClusterCertDuration()
-        body.duration = 365
+        body.duration = 1
         cert_request.body = body
 
         cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
@@ -3522,6 +4338,10 @@ def get_cce_cluster_pvcs(region: str, cluster_id: str, ak: Optional[str] = None,
                 f.write(base64.b64decode(user_data['client_key_data']))
             configuration.key_file = key_file
 
+        # 注册临时证书文件以便后续清理
+        _register_cert_file(cert_file)
+        _register_cert_file(key_file)
+
         # Set default configuration and get PVCs
         k8s_client.Configuration.set_default(configuration)
         v1 = k8s_client.CoreV1Api()
@@ -3562,6 +4382,9 @@ def get_cce_cluster_pvcs(region: str, cluster_id: str, ak: Optional[str] = None,
                 pvc_info["conditions"] = conditions
             pvc_list.append(pvc_info)
 
+        # 清理临时证书文件
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
         return {
             "success": True,
             "region": region,
@@ -3572,6 +4395,8 @@ def get_cce_cluster_pvcs(region: str, cluster_id: str, ak: Optional[str] = None,
             "pvcs": pvc_list
         }
 
+        
+
     except Exception as e:
         return {
             "success": False,
@@ -3580,7 +4405,7 @@ def get_cce_cluster_pvcs(region: str, cluster_id: str, ak: Optional[str] = None,
         }
 
 
-def get_cce_cluster_pvs(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+def get_kubernetes_pvs(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
     """Get PVs (PersistentVolumes) in a CCE cluster"""
     access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
 
@@ -3615,7 +4440,7 @@ def get_cce_cluster_pvs(region: str, cluster_id: str, ak: Optional[str] = None, 
         cert_request = CreateKubernetesClusterCertRequest()
         cert_request.cluster_id = cluster_id
         body = ClusterCertDuration()
-        body.duration = 365
+        body.duration = 1
         cert_request.body = body
 
         cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
@@ -3660,6 +4485,10 @@ def get_cce_cluster_pvs(region: str, cluster_id: str, ak: Optional[str] = None, 
             with open(key_file, 'wb') as f:
                 f.write(base64.b64decode(user_data['client_key_data']))
             configuration.key_file = key_file
+
+        # 注册临时证书文件以便后续清理
+        _register_cert_file(cert_file)
+        _register_cert_file(key_file)
 
         # Set default configuration and get PVs
         k8s_client.Configuration.set_default(configuration)
@@ -3722,6 +4551,9 @@ def get_cce_cluster_pvs(region: str, cluster_id: str, ak: Optional[str] = None, 
                 pv_info["conditions"] = conditions
             pv_list.append(pv_info)
 
+        # 清理临时证书文件
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
         return {
             "success": True,
             "region": region,
@@ -3731,7 +4563,375 @@ def get_cce_cluster_pvs(region: str, cluster_id: str, ak: Optional[str] = None, 
             "pvs": pv_list
         }
 
+        
+
     except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
+def get_kubernetes_services(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None) -> Dict[str, Any]:
+    """Get services in a CCE cluster
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        cluster_id: CCE cluster ID
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+        namespace: Kubernetes namespace (optional, defaults to all namespaces)
+    
+    Returns:
+        Dict with success status and list of services
+    """
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {
+            "success": False,
+            "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+        }
+
+    if not cluster_id:
+        return {
+            "success": False,
+            "error": "cluster_id is required"
+        }
+
+    if not K8S_AVAILABLE:
+        return {
+            "success": False,
+            "error": f"Kubernetes SDK not installed: {K8S_IMPORT_ERROR}"
+        }
+
+    if not SDK_AVAILABLE:
+        return {
+            "success": False,
+            "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"
+        }
+
+    cert_file = None
+    key_file = None
+
+    try:
+        # Get cluster credentials
+        cce_client = create_cce_client(region, access_key, secret_key, proj_id)
+
+        cert_request = CreateKubernetesClusterCertRequest()
+        cert_request.cluster_id = cluster_id
+        body = ClusterCertDuration()
+        body.duration = 1
+        cert_request.body = body
+
+        cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
+        kubeconfig_data = cert_response.to_dict()
+
+        # Find external cluster endpoint
+        external_cluster = None
+        for c in kubeconfig_data.get('clusters', []):
+            if 'external' in c.get('name', '') and 'TLS' not in c.get('name', ''):
+                external_cluster = c
+                break
+
+        if not external_cluster:
+            external_cluster = kubeconfig_data.get('clusters', [{}])[0]
+
+        if not external_cluster:
+            return {
+                "success": False,
+                "error": "Could not find cluster endpoint"
+            }
+
+        # Configure Kubernetes client
+        configuration = k8s_client.Configuration()
+        configuration.host = external_cluster.get('cluster', {}).get('server')
+        configuration.verify_ssl = False
+
+        # Write certificates
+        user_data = None
+        for u in kubeconfig_data.get('users', []):
+            if u.get('name') == 'user':
+                user_data = u.get('user', {})
+                break
+
+        if user_data and user_data.get('client_certificate_data'):
+            cert_file = '/tmp/cce_client_service.crt'
+            with open(cert_file, 'wb') as f:
+                f.write(base64.b64decode(user_data['client_certificate_data']))
+            configuration.cert_file = cert_file
+
+        if user_data and user_data.get('client_key_data'):
+            key_file = '/tmp/cce_client_service.key'
+            with open(key_file, 'wb') as f:
+                f.write(base64.b64decode(user_data['client_key_data']))
+            configuration.key_file = key_file
+
+        # Create API client
+        k8s_client.Configuration.set_default(configuration)
+        core_v1 = k8s_client.CoreV1Api()
+
+        # Get services
+        service_list = []
+        if namespace:
+            services = core_v1.list_namespaced_service(namespace)
+        else:
+            services = core_v1.list_service_for_all_namespaces()
+
+        for svc in services.items:
+            # Build service info
+            svc_info = {
+                "name": svc.metadata.name,
+                "namespace": svc.metadata.namespace,
+                "type": svc.spec.type if svc.spec.type else "ClusterIP",
+                "cluster_ip": svc.spec.cluster_ip if hasattr(svc.spec, 'cluster_ip') else None,
+                "cluster_ips": list(svc.spec.cluster_ips) if hasattr(svc.spec, 'cluster_ips') and svc.spec.cluster_ips else [],
+                "external_ips": list(svc.spec.external_ips) if hasattr(svc.spec, 'external_ips') and svc.spec.external_ips else [],
+                "external_name": svc.spec.external_name if hasattr(svc.spec, 'external_name') else None,
+                "load_balancer_ip": None,
+                "load_balancer_ingress": [],
+                "ports": [],
+                "selector": dict(svc.spec.selector) if svc.spec.selector else None,
+                "session_affinity": svc.spec.session_affinity if hasattr(svc.spec, 'session_affinity') else None,
+                "created": svc.metadata.creation_timestamp.isoformat() if svc.metadata.creation_timestamp else None,
+                "labels": dict(svc.metadata.labels) if svc.metadata.labels else {},
+                "annotations": dict(svc.metadata.annotations) if svc.metadata.annotations else {}
+            }
+
+            # Extract LoadBalancer info
+            if svc.spec.type == "LoadBalancer":
+                if svc.status.load_balancer and svc.status.load_balancer.ingress:
+                    for ingress in svc.status.load_balancer.ingress:
+                        svc_info["load_balancer_ingress"].append({
+                            "ip": ingress.ip,
+                            "hostname": ingress.hostname
+                        })
+                    if svc_info["load_balancer_ingress"]:
+                        svc_info["load_balancer_ip"] = svc_info["load_balancer_ingress"][0].get("ip")
+
+            # Extract ports
+            if svc.spec.ports:
+                for port in svc.spec.ports:
+                    port_info = {
+                        "name": port.name,
+                        "protocol": port.protocol,
+                        "port": port.port,
+                        "target_port": port.target_port,
+                        "node_port": port.node_port
+                    }
+                    svc_info["ports"].append(port_info)
+
+            service_list.append(svc_info)
+
+        # Cleanup
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
+
+        return {
+            "success": True,
+            "region": region,
+            "cluster_id": cluster_id,
+            "namespace": namespace,
+            "count": len(service_list),
+            "services": service_list
+        }
+
+    except Exception as e:
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
+def get_kubernetes_ingresses(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None) -> Dict[str, Any]:
+    """Get ingresses in a CCE cluster
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        cluster_id: CCE cluster ID
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+        namespace: Kubernetes namespace (optional, defaults to all namespaces)
+    
+    Returns:
+        Dict with success status and list of ingresses
+    """
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {
+            "success": False,
+            "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+        }
+
+    if not cluster_id:
+        return {
+            "success": False,
+            "error": "cluster_id is required"
+        }
+
+    if not K8S_AVAILABLE:
+        return {
+            "success": False,
+            "error": f"Kubernetes SDK not installed: {K8S_IMPORT_ERROR}"
+        }
+
+    if not SDK_AVAILABLE:
+        return {
+            "success": False,
+            "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"
+        }
+
+    cert_file = None
+    key_file = None
+
+    try:
+        # Get cluster credentials
+        cce_client = create_cce_client(region, access_key, secret_key, proj_id)
+
+        cert_request = CreateKubernetesClusterCertRequest()
+        cert_request.cluster_id = cluster_id
+        body = ClusterCertDuration()
+        body.duration = 1
+        cert_request.body = body
+
+        cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
+        kubeconfig_data = cert_response.to_dict()
+
+        # Find external cluster endpoint
+        external_cluster = None
+        for c in kubeconfig_data.get('clusters', []):
+            if 'external' in c.get('name', '') and 'TLS' not in c.get('name', ''):
+                external_cluster = c
+                break
+
+        if not external_cluster:
+            external_cluster = kubeconfig_data.get('clusters', [{}])[0]
+
+        if not external_cluster:
+            return {
+                "success": False,
+                "error": "Could not find cluster endpoint"
+            }
+
+        # Configure Kubernetes client
+        configuration = k8s_client.Configuration()
+        configuration.host = external_cluster.get('cluster', {}).get('server')
+        configuration.verify_ssl = False
+
+        # Write certificates
+        user_data = None
+        for u in kubeconfig_data.get('users', []):
+            if u.get('name') == 'user':
+                user_data = u.get('user', {})
+                break
+
+        if user_data and user_data.get('client_certificate_data'):
+            cert_file = '/tmp/cce_client_ingress.crt'
+            with open(cert_file, 'wb') as f:
+                f.write(base64.b64decode(user_data['client_certificate_data']))
+            configuration.cert_file = cert_file
+
+        if user_data and user_data.get('client_key_data'):
+            key_file = '/tmp/cce_client_ingress.key'
+            with open(key_file, 'wb') as f:
+                f.write(base64.b64decode(user_data['client_key_data']))
+            configuration.key_file = key_file
+
+        # Create API client
+        k8s_client.Configuration.set_default(configuration)
+        networking_v1 = k8s_client.NetworkingV1Api()
+
+        # Get ingresses
+        ingress_list = []
+        if namespace:
+            ingresses = networking_v1.list_namespaced_ingress(namespace)
+        else:
+            ingresses = networking_v1.list_ingress_for_all_namespaces()
+
+        for ingress in ingresses.items:
+            # Build ingress info
+            ingress_info = {
+                "name": ingress.metadata.name,
+                "namespace": ingress.metadata.namespace,
+                "ingress_class_name": ingress.spec.ingress_class_name,
+                "default_backend": None,
+                "rules": [],
+                "tls": [],
+                "load_balancer_ingress": [],
+                "created": ingress.metadata.creation_timestamp.isoformat() if ingress.metadata.creation_timestamp else None,
+                "labels": dict(ingress.metadata.labels) if ingress.metadata.labels else {},
+                "annotations": dict(ingress.metadata.annotations) if ingress.metadata.annotations else {}
+            }
+
+            # Extract default backend
+            if ingress.spec.default_backend:
+                ingress_info["default_backend"] = {
+                    "service_name": ingress.spec.default_backend.service.name if ingress.spec.default_backend.service else None,
+                    "service_port": ingress.spec.default_backend.service.port.number if ingress.spec.default_backend.service and ingress.spec.default_backend.service.port else None
+                }
+
+            # Extract rules
+            if ingress.spec.rules:
+                for rule in ingress.spec.rules:
+                    rule_info = {
+                        "host": rule.host,
+                        "paths": []
+                    }
+                    if rule.http and rule.http.paths:
+                        for path in rule.http.paths:
+                            path_info = {
+                                "path": path.path,
+                                "path_type": path.path_type,
+                                "backend": {
+                                    "service_name": path.backend.service.name if path.backend.service else None,
+                                    "service_port": path.backend.service.port.number if path.backend.service and path.backend.service.port else None
+                                }
+                            }
+                            rule_info["paths"].append(path_info)
+                    ingress_info["rules"].append(rule_info)
+
+            # Extract TLS
+            if ingress.spec.tls:
+                for tls in ingress.spec.tls:
+                    tls_info = {
+                        "hosts": tls.hosts,
+                        "secret_name": tls.secret_name
+                    }
+                    ingress_info["tls"].append(tls_info)
+
+            # Extract LoadBalancer ingress status
+            if ingress.status.load_balancer and ingress.status.load_balancer.ingress:
+                for lb_ingress in ingress.status.load_balancer.ingress:
+                    ingress_info["load_balancer_ingress"].append({
+                        "ip": lb_ingress.ip,
+                        "hostname": lb_ingress.hostname
+                    })
+
+            ingress_list.append(ingress_info)
+
+        # Cleanup
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
+
+        return {
+            "success": True,
+            "region": region,
+            "cluster_id": cluster_id,
+            "namespace": namespace,
+            "count": len(ingress_list),
+            "ingresses": ingress_list
+        }
+
+    except Exception as e:
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
         return {
             "success": False,
             "error": str(e),
@@ -3751,9 +4951,13 @@ def get_aom_prom_metrics_http(region: str, aom_instance_id: str, query: str, sta
     from urllib.parse import quote, unquote
     import requests
     
-    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+    # Auto-fetch project_id if not provided
+    access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
     if not access_key or not secret_key:
         return {"success": False, "error": "Credentials not provided"}
+    
+    if not proj_id:
+        return {"success": False, "error": "Project ID not found. Please provide project_id parameter."}
     
     now = int(time_module.time())
     end_time = end if end else now
@@ -3857,6 +5061,3623 @@ def get_aom_prom_metrics_http(region: str, aom_instance_id: str, query: str, sta
             return {"success": False, "error": "HTTP " + str(resp.status_code) + ": " + resp.text[:500], "url": url, "request_headers": {k: v for k, v in headers.items() if k != 'Authorization'}, "signature_debug": {"canonical_uri": canonical_uri, "canonical_querystring": canonical_querystring[:200], "signed_headers": signed_headers}}
     except Exception as e:
         return {"success": False, "error": str(e), "url": url}
+
+
+def cce_cluster_inspection(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+    """CCE集群巡检工具
+    
+    执行全面的集群健康巡检，生成详细报告：
+    1. Pod状态巡检 - 检查Pod运行状态和重启情况
+    2. Node状态巡检 - 检查节点健康状态
+    3. 插件Pod监控 - 检查kube-system命名空间下的CPU/内存使用率
+    4. 节点资源监控 - 检查节点CPU/内存/磁盘使用率
+    5. Event巡检 - 检查异常事件
+    6. AOM告警巡检 - 检查集群相关告警
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        cluster_id: CCE cluster ID
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+    
+    Returns:
+        Dictionary with inspection results and detailed report
+    """
+    import time as time_module
+    
+    access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Credentials not provided"}
+
+    if not cluster_id:
+        return {"success": False, "error": "cluster_id is required"}
+
+    # 获取集群名称（用于AOM监控查询）
+    cluster_name = cluster_id  # 默认使用cluster_id
+    try:
+        clusters_result = list_cce_clusters(region, access_key, secret_key, proj_id)
+        if clusters_result.get("success"):
+            for c in clusters_result.get("clusters", []):
+                if c.get("id") == cluster_id:
+                    cluster_name = c.get("name", cluster_id)
+                    break
+    except Exception:
+        pass
+
+    # 初始化巡检结果
+    inspection = {
+        "success": True,
+        "region": region,
+        "cluster_id": cluster_id,
+        "inspection_time": time_module.strftime('%Y-%m-%d %H:%M:%S', time_module.localtime()),
+        "result": {
+            "status": "HEALTHY",
+            "total_issues": 0,
+            "critical_issues": 0,
+            "warning_issues": 0
+        },
+        "checks": {},
+        "issues": [],
+        "report": ""
+    }
+    
+    def add_issue(severity, category, item, details):
+        """添加问题到巡检结果"""
+        inspection["issues"].append({
+            "severity": severity,
+            "category": category,
+            "item": item,
+            "details": details
+        })
+        inspection["result"]["total_issues"] += 1
+        if severity == "CRITICAL":
+            inspection["result"]["critical_issues"] += 1
+            inspection["result"]["status"] = "CRITICAL"
+        elif severity == "WARNING":
+            inspection["result"]["warning_issues"] += 1
+            if inspection["result"]["status"] == "HEALTHY":
+                inspection["result"]["status"] = "WARNING"
+    
+    # ========== 1. Pod状态巡检 ==========
+    pod_check = {
+        "name": "Pod状态巡检",
+        "status": "PASS",
+        "total": 0,
+        "running": 0,
+        "pending": 0,
+        "failed": 0,
+        "restart_pods": [],
+        "abnormal_pods": [],
+        "abnormal_summary": {}  # 按异常类型归一统计
+    }
+    
+    pod_result = get_kubernetes_pods(region, cluster_id, access_key, secret_key, proj_id)
+    if pod_result.get("success"):
+        pods = pod_result.get("pods", [])
+        pod_check["total"] = len(pods)
+        
+        # 用于归一统计
+        restart_pods_by_type = {}  # 按重启次数分组
+        abnormal_pods_by_reason = {}  # 按异常原因分组
+        
+        for pod in pods:
+            status = pod.get("status", "")
+            pod_name = pod.get("name", "")
+            namespace = pod.get("namespace", "")
+            node = pod.get("node", "Unknown")
+            ip = pod.get("ip", "Unknown")
+            
+            if status == "Running":
+                pod_check["running"] += 1
+                
+                # 检查容器重启
+                containers = pod.get("containers", [])
+                for container in containers:
+                    restart_count = container.get("restart_count", 0)
+                    container_name = container.get("name", "")
+                    container_state = container.get("state", "unknown")
+                    ready = container.get("ready", False)
+                    
+                    if restart_count > 0:
+                        # 解析容器状态
+                        state_reason = "Unknown"
+                        state_message = ""
+                        if isinstance(container_state, str):
+                            if "CrashLoopBackOff" in container_state:
+                                state_reason = "CrashLoopBackOff"
+                            elif "ImagePullBackOff" in container_state or "ErrImagePull" in container_state:
+                                state_reason = "ImagePullError"
+                            elif "OOMKilled" in container_state:
+                                state_reason = "OOMKilled"
+                            else:
+                                state_reason = "ContainerError"
+                        
+                        restart_info = {
+                            "pod": pod_name,
+                            "namespace": namespace,
+                            "node": node,
+                            "ip": ip,
+                            "container": container_name,
+                            "restart_count": restart_count,
+                            "ready": ready,
+                            "state_reason": state_reason,
+                            "state_detail": container_state[:200] if isinstance(container_state, str) else str(container_state)[:200]
+                        }
+                        pod_check["restart_pods"].append(restart_info)
+                        
+                        # 按类型归一统计
+                        restart_key = f"{namespace}/{state_reason}" if state_reason != "Unknown" else f"{namespace}/重启异常"
+                        if restart_key not in restart_pods_by_type:
+                            restart_pods_by_type[restart_key] = {
+                                "type": restart_key,
+                                "count": 0,
+                                "pods": [],
+                                "max_restart": 0,
+                                "namespace": namespace,
+                                "reason": state_reason
+                            }
+                        restart_pods_by_type[restart_key]["count"] += 1
+                        restart_pods_by_type[restart_key]["pods"].append(pod_name)
+                        restart_pods_by_type[restart_key]["max_restart"] = max(restart_pods_by_type[restart_key]["max_restart"], restart_count)
+                        
+                        if restart_count >= 5:
+                            add_issue("CRITICAL", "Pod异常重启", pod_name, 
+                                f"命名空间: {namespace}, 节点: {node}, 容器 '{container_name}' 重启 {restart_count} 次, 状态: {state_reason}, Ready: {ready}")
+                        elif restart_count >= 2:
+                            add_issue("WARNING", "Pod重启", pod_name,
+                                f"命名空间: {namespace}, 节点: {node}, 容器 '{container_name}' 重启 {restart_count} 次")
+            
+            elif status == "Pending":
+                pod_check["pending"] += 1
+                abnormal_info = {
+                    "pod": pod_name,
+                    "namespace": namespace,
+                    "node": node,
+                    "ip": ip,
+                    "status": status,
+                    "reason": pod.get("message", "调度中或资源不足")
+                }
+                pod_check["abnormal_pods"].append(abnormal_info)
+                
+                # 按原因归一
+                reason_key = f"{namespace}/Pending"
+                if reason_key not in abnormal_pods_by_reason:
+                    abnormal_pods_by_reason[reason_key] = {"type": reason_key, "count": 0, "pods": [], "namespace": namespace, "reason": "Pending"}
+                abnormal_pods_by_reason[reason_key]["count"] += 1
+                abnormal_pods_by_reason[reason_key]["pods"].append(pod_name)
+                
+                add_issue("WARNING", "Pod调度异常", pod_name, 
+                    f"命名空间: {namespace}, 状态: Pending, 原因: {pod.get('message', '调度中或资源不足')}")
+            
+            elif status in ["Failed", "Unknown", "CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "OOMKilled", "Evicted"]:
+                pod_check["failed"] += 1
+                
+                # 解析具体异常原因
+                error_reason = status
+                error_detail = pod.get("message", "")
+                
+                if "CrashLoopBackOff" in str(pod) or status == "CrashLoopBackOff":
+                    error_reason = "CrashLoopBackOff"
+                elif "ImagePullBackOff" in str(pod) or "ErrImagePull" in str(pod) or status in ["ImagePullBackOff", "ErrImagePull"]:
+                    error_reason = "ImagePullError"
+                elif "OOMKilled" in str(pod) or status == "OOMKilled":
+                    error_reason = "OOMKilled"
+                elif "Evicted" in str(pod) or status == "Evicted":
+                    error_reason = "Evicted"
+                
+                abnormal_info = {
+                    "pod": pod_name,
+                    "namespace": namespace,
+                    "node": node,
+                    "ip": ip,
+                    "status": status,
+                    "reason": error_reason,
+                    "detail": error_detail[:200]
+                }
+                pod_check["abnormal_pods"].append(abnormal_info)
+                
+                # 按原因归一
+                reason_key = f"{namespace}/{error_reason}"
+                if reason_key not in abnormal_pods_by_reason:
+                    abnormal_pods_by_reason[reason_key] = {"type": reason_key, "count": 0, "pods": [], "namespace": namespace, "reason": error_reason}
+                abnormal_pods_by_reason[reason_key]["count"] += 1
+                abnormal_pods_by_reason[reason_key]["pods"].append(pod_name)
+                
+                add_issue("CRITICAL", "Pod异常", pod_name, 
+                    f"命名空间: {namespace}, 节点: {node}, 状态: {status}, 原因: {error_reason}, 详情: {error_detail[:100]}")
+        
+        # 保存归一统计结果
+        pod_check["abnormal_summary"] = {
+            "restart_groups": list(restart_pods_by_type.values()),
+            "abnormal_groups": list(abnormal_pods_by_reason.values())
+        }
+        
+        if pod_check["failed"] > 0 or pod_check["pending"] > 100:
+            pod_check["status"] = "FAIL"
+        elif pod_check["restart_pods"] or pod_check["abnormal_pods"]:
+            pod_check["status"] = "WARN"
+    
+    inspection["checks"]["pods"] = pod_check
+    
+    # ========== 2. Node状态巡检 ==========
+    node_check = {
+        "name": "Node状态巡检",
+        "status": "PASS",
+        "total": 0,
+        "ready": 0,
+        "not_ready": 0,
+        "abnormal_nodes": [],
+        "node_details": []  # 详细的节点信息
+    }
+    
+    node_result = list_cce_cluster_nodes(region, cluster_id, access_key, secret_key, proj_id)
+    if node_result.get("success"):
+        nodes = node_result.get("nodes", [])
+        node_check["total"] = len(nodes)
+        
+        for node in nodes:
+            node_name = node.get("name", "")
+            node_id = node.get("id", "")
+            node_ip = node.get("ip", "Unknown")
+            node_status = node.get("status", "")
+            node_flavor = node.get("flavor", "Unknown")
+            node_created = node.get("created_at", "")
+            
+            node_detail = {
+                "name": node_name,
+                "id": node_id,
+                "ip": node_ip,
+                "flavor": node_flavor,
+                "status": node_status,
+                "created_at": node_created,
+                "error_reason": None
+            }
+            
+            # Active 表示节点正常
+            if node_status == "Active":
+                node_check["ready"] += 1
+                node_detail["health"] = "健康"
+            else:
+                node_check["not_ready"] += 1
+                
+                # 分析异常原因
+                error_reason = "节点状态异常"
+                if node_status == "Error":
+                    error_reason = "节点处于错误状态，可能需要重启或重新加入集群"
+                elif node_status == "Deleting":
+                    error_reason = "节点正在删除中"
+                elif node_status == "Installing":
+                    error_reason = "节点正在安装中，请等待安装完成"
+                elif node_status == "Abnormal":
+                    error_reason = "节点状态异常，请检查节点网络或kubelet服务"
+                elif not node_status:
+                    error_reason = "节点状态未知，可能无法与API Server通信"
+                
+                node_detail["health"] = "异常"
+                node_detail["error_reason"] = error_reason
+                
+                node_info = {
+                    "name": node_name,
+                    "id": node_id,
+                    "status": node_status if node_status else "Unknown",
+                    "ip": node_ip,
+                    "flavor": node_flavor,
+                    "reason": error_reason
+                }
+                node_check["abnormal_nodes"].append(node_info)
+                add_issue("CRITICAL", "节点异常", node_name,
+                    f"节点ID: {node_id}, 状态: {node_status if node_status else 'Unknown'}, IP: {node_ip}, 规格: {node_flavor}, 原因: {error_reason}")
+            
+            node_check["node_details"].append(node_detail)
+        
+        if node_check["not_ready"] > 0:
+            node_check["status"] = "FAIL"
+    
+    inspection["checks"]["nodes"] = node_check
+    
+    # ========== 3. 插件Pod监控巡检 (kube-system + monitoring) ==========
+    addon_pod_check = {
+        "name": "插件Pod监控巡检",
+        "status": "PASS",
+        "checked": False,
+        "high_cpu_count": 0,
+        "high_memory_count": 0,
+        "high_cpu_pods_top10": [],
+        "high_memory_pods_top10": [],
+        "namespaces": ["kube-system", "monitoring"]
+    }
+    
+    # ========== 4. 业务Pod监控巡检 (其他命名空间) ==========
+    biz_pod_check = {
+        "name": "业务Pod监控巡检",
+        "status": "PASS",
+        "checked": False,
+        "high_cpu_count": 0,
+        "high_memory_count": 0,
+        "high_cpu_pods_top10": [],
+        "high_memory_pods_top10": [],
+        "namespaces": []  # 动态获取
+    }
+    
+    # 获取AOM实例 - 尝试所有CCE类型的实例
+    aom_instance_id = None
+    aom_instance_endpoints = None
+    aom_instances = list_aom_instances(region, access_key, secret_key, proj_id)
+    cce_instances = []
+    if aom_instances.get("success"):
+        for instance in aom_instances.get("instances", []):
+            if instance.get("type") == "CCE":
+                cce_instances.append(instance)
+    
+    # 尝试每个CCE实例，直到找到有数据的
+    for instance in cce_instances:
+        test_instance_id = instance.get("id")
+        test_query = "up"
+        test_result = get_aom_prom_metrics_http(region, test_instance_id, test_query, ak=access_key, sk=secret_key, project_id=proj_id)
+        if test_result.get("success") and test_result.get("result", {}).get("data", {}).get("result"):
+            aom_instance_id = test_instance_id
+            aom_instance_endpoints = instance.get("endpoints", {})
+            break
+    
+    if aom_instance_id:
+        addon_pod_check["checked"] = True
+        addon_pod_check["aom_instance_id"] = aom_instance_id
+        biz_pod_check["checked"] = True
+        biz_pod_check["aom_instance_id"] = aom_instance_id
+        
+        # 获取所有Pod列表（用于获取Pod详细信息）
+        all_pods_result = get_kubernetes_pods(region, cluster_id, access_key, secret_key, proj_id)
+        all_pods_map = {}
+        all_namespaces = set()
+        if all_pods_result.get("success"):
+            for pod in all_pods_result.get("pods", []):
+                all_pods_map[pod.get("name", "")] = pod
+                ns = pod.get("namespace", "")
+                if ns and ns not in ["kube-system", "monitoring"]:
+                    all_namespaces.add(ns)
+        biz_pod_check["namespaces"] = list(all_namespaces)
+        
+        # ===== 插件Pod巡检 =====
+        # CPU数量查询 - kube-system + monitoring
+        addon_cpu_count_query = 'count(sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{image!="",namespace=~"kube-system|monitoring"}[5m])) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{resource="cpu",namespace=~"kube-system|monitoring"}) * 100 > 80)'
+        addon_cpu_count_result = get_aom_prom_metrics_http(region, aom_instance_id, addon_cpu_count_query, ak=access_key, sk=secret_key, project_id=proj_id)
+        
+        if addon_cpu_count_result.get("success") and addon_cpu_count_result.get("result", {}).get("data", {}).get("result"):
+            for item in addon_cpu_count_result["result"]["data"]["result"]:
+                values = item.get("values", [])
+                if values:
+                    try:
+                        latest_value = float(values[-1][1])
+                        addon_pod_check["high_cpu_count"] = int(latest_value)
+                    except (ValueError, IndexError):
+                        pass
+        
+        # CPU Top 10 - 插件
+        if addon_pod_check["high_cpu_count"] > 0:
+            addon_cpu_top10_query = 'topk(10, sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{image!="",namespace=~"kube-system|monitoring"}[5m])) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{resource="cpu",namespace=~"kube-system|monitoring"}) * 100)'
+            addon_cpu_top10_result = get_aom_prom_metrics_http(region, aom_instance_id, addon_cpu_top10_query, ak=access_key, sk=secret_key, project_id=proj_id)
+            
+            if addon_cpu_top10_result.get("success") and addon_cpu_top10_result.get("result", {}).get("data", {}).get("result"):
+                for item in addon_cpu_top10_result["result"]["data"]["result"]:
+                    metric = item.get("metric", {})
+                    values = item.get("values", [])
+                    if values:
+                        try:
+                            latest_value = float(values[-1][1])
+                            pod_name = metric.get("pod", "unknown")
+                            namespace = metric.get("namespace", "unknown")
+                            
+                            if latest_value > 80:
+                                pod_info = all_pods_map.get(pod_name, {})
+                                labels = pod_info.get("labels", {})
+                                app_label = labels.get("app", labels.get("k8s-app", "unknown"))
+                                
+                                resource_info = {
+                                    "pod": pod_name,
+                                    "namespace": namespace,
+                                    "app": app_label,
+                                    "cpu_usage_percent": round(latest_value, 2),
+                                    "node": pod_info.get("node", "Unknown"),
+                                    "status": "critical" if latest_value > 90 else "warning"
+                                }
+                                addon_pod_check["high_cpu_pods_top10"].append(resource_info)
+                                add_issue("WARNING", "插件Pod CPU使用率高", pod_name,
+                                    f"命名空间: {namespace}, CPU使用率: {round(latest_value, 2)}%, 节点: {pod_info.get('node', 'Unknown')}")
+                        except (ValueError, IndexError):
+                            pass
+        
+        # 内存数量查询 - 插件
+        addon_mem_count_query = 'count(sum by (pod, namespace) (container_memory_working_set_bytes{image!="",namespace=~"kube-system|monitoring"}) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{resource="memory",namespace=~"kube-system|monitoring"}) * 100 > 80)'
+        addon_mem_count_result = get_aom_prom_metrics_http(region, aom_instance_id, addon_mem_count_query, ak=access_key, sk=secret_key, project_id=proj_id)
+        
+        if addon_mem_count_result.get("success") and addon_mem_count_result.get("result", {}).get("data", {}).get("result"):
+            for item in addon_mem_count_result["result"]["data"]["result"]:
+                values = item.get("values", [])
+                if values:
+                    try:
+                        latest_value = float(values[-1][1])
+                        addon_pod_check["high_memory_count"] = int(latest_value)
+                    except (ValueError, IndexError):
+                        pass
+        
+        # 内存 Top 10 - 插件
+        if addon_pod_check["high_memory_count"] > 0:
+            addon_mem_top10_query = 'topk(10, sum by (pod, namespace) (container_memory_working_set_bytes{image!="",namespace=~"kube-system|monitoring"}) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{resource="memory",namespace=~"kube-system|monitoring"}) * 100)'
+            addon_mem_top10_result = get_aom_prom_metrics_http(region, aom_instance_id, addon_mem_top10_query, ak=access_key, sk=secret_key, project_id=proj_id)
+            
+            if addon_mem_top10_result.get("success") and addon_mem_top10_result.get("result", {}).get("data", {}).get("result"):
+                for item in addon_mem_top10_result["result"]["data"]["result"]:
+                    metric = item.get("metric", {})
+                    values = item.get("values", [])
+                    if values:
+                        try:
+                            latest_value = float(values[-1][1])
+                            pod_name = metric.get("pod", "unknown")
+                            namespace = metric.get("namespace", "unknown")
+                            
+                            if latest_value > 80:
+                                pod_info = all_pods_map.get(pod_name, {})
+                                labels = pod_info.get("labels", {})
+                                app_label = labels.get("app", labels.get("k8s-app", "unknown"))
+                                
+                                existing_pod = None
+                                for p in addon_pod_check["high_cpu_pods_top10"]:
+                                    if p["pod"] == pod_name and p["namespace"] == namespace:
+                                        existing_pod = p
+                                        break
+                                
+                                if existing_pod:
+                                    existing_pod["memory_usage_percent"] = round(latest_value, 2)
+                                else:
+                                    resource_info = {
+                                        "pod": pod_name,
+                                        "namespace": namespace,
+                                        "app": app_label,
+                                        "memory_usage_percent": round(latest_value, 2),
+                                        "node": pod_info.get("node", "Unknown"),
+                                        "status": "critical" if latest_value > 90 else "warning"
+                                    }
+                                    addon_pod_check["high_memory_pods_top10"].append(resource_info)
+                                add_issue("WARNING", "插件Pod内存使用率高", pod_name,
+                                    f"命名空间: {namespace}, 内存使用率: {round(latest_value, 2)}%, 节点: {pod_info.get('node', 'Unknown')}")
+                        except (ValueError, IndexError):
+                            pass
+        
+        # 设置插件巡检状态
+        if addon_pod_check["high_cpu_count"] > 0 or addon_pod_check["high_memory_count"] > 0:
+            addon_pod_check["status"] = "WARN"
+        
+        # ===== 业务Pod巡检 =====
+        # CPU数量查询 - 非kube-system/monitoring
+        biz_cpu_count_query = 'count(sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{image!="",namespace!~"kube-system|monitoring"}[5m])) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{resource="cpu",namespace!~"kube-system|monitoring"}) * 100 > 80)'
+        biz_cpu_count_result = get_aom_prom_metrics_http(region, aom_instance_id, biz_cpu_count_query, ak=access_key, sk=secret_key, project_id=proj_id)
+        
+        if biz_cpu_count_result.get("success") and biz_cpu_count_result.get("result", {}).get("data", {}).get("result"):
+            for item in biz_cpu_count_result["result"]["data"]["result"]:
+                values = item.get("values", [])
+                if values:
+                    try:
+                        latest_value = float(values[-1][1])
+                        biz_pod_check["high_cpu_count"] = int(latest_value)
+                    except (ValueError, IndexError):
+                        pass
+        
+        # CPU Top 10 - 业务
+        if biz_pod_check["high_cpu_count"] > 0:
+            biz_cpu_top10_query = 'topk(10, sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{image!="",namespace!~"kube-system|monitoring"}[5m])) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{resource="cpu",namespace!~"kube-system|monitoring"}) * 100)'
+            biz_cpu_top10_result = get_aom_prom_metrics_http(region, aom_instance_id, biz_cpu_top10_query, ak=access_key, sk=secret_key, project_id=proj_id)
+            
+            if biz_cpu_top10_result.get("success") and biz_cpu_top10_result.get("result", {}).get("data", {}).get("result"):
+                for item in biz_cpu_top10_result["result"]["data"]["result"]:
+                    metric = item.get("metric", {})
+                    values = item.get("values", [])
+                    if values:
+                        try:
+                            latest_value = float(values[-1][1])
+                            pod_name = metric.get("pod", "unknown")
+                            namespace = metric.get("namespace", "unknown")
+                            
+                            if latest_value > 80:
+                                pod_info = all_pods_map.get(pod_name, {})
+                                labels = pod_info.get("labels", {})
+                                app_label = labels.get("app", labels.get("k8s-app", "unknown"))
+                                
+                                resource_info = {
+                                    "pod": pod_name,
+                                    "namespace": namespace,
+                                    "app": app_label,
+                                    "cpu_usage_percent": round(latest_value, 2),
+                                    "node": pod_info.get("node", "Unknown"),
+                                    "status": "critical" if latest_value > 90 else "warning"
+                                }
+                                biz_pod_check["high_cpu_pods_top10"].append(resource_info)
+                                add_issue("WARNING", "业务Pod CPU使用率高", pod_name,
+                                    f"命名空间: {namespace}, CPU使用率: {round(latest_value, 2)}%, 节点: {pod_info.get('node', 'Unknown')}")
+                        except (ValueError, IndexError):
+                            pass
+        
+        # 内存数量查询 - 业务
+        biz_mem_count_query = 'count(sum by (pod, namespace) (container_memory_working_set_bytes{image!="",namespace!~"kube-system|monitoring"}) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{resource="memory",namespace!~"kube-system|monitoring"}) * 100 > 80)'
+        biz_mem_count_result = get_aom_prom_metrics_http(region, aom_instance_id, biz_mem_count_query, ak=access_key, sk=secret_key, project_id=proj_id)
+        
+        if biz_mem_count_result.get("success") and biz_mem_count_result.get("result", {}).get("data", {}).get("result"):
+            for item in biz_mem_count_result["result"]["data"]["result"]:
+                values = item.get("values", [])
+                if values:
+                    try:
+                        latest_value = float(values[-1][1])
+                        biz_pod_check["high_memory_count"] = int(latest_value)
+                    except (ValueError, IndexError):
+                        pass
+        
+        # 内存 Top 10 - 业务
+        if biz_pod_check["high_memory_count"] > 0:
+            biz_mem_top10_query = 'topk(10, sum by (pod, namespace) (container_memory_working_set_bytes{image!="",namespace!~"kube-system|monitoring"}) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{resource="memory",namespace!~"kube-system|monitoring"}) * 100)'
+            biz_mem_top10_result = get_aom_prom_metrics_http(region, aom_instance_id, biz_mem_top10_query, ak=access_key, sk=secret_key, project_id=proj_id)
+            
+            if biz_mem_top10_result.get("success") and biz_mem_top10_result.get("result", {}).get("data", {}).get("result"):
+                for item in biz_mem_top10_result["result"]["data"]["result"]:
+                    metric = item.get("metric", {})
+                    values = item.get("values", [])
+                    if values:
+                        try:
+                            latest_value = float(values[-1][1])
+                            pod_name = metric.get("pod", "unknown")
+                            namespace = metric.get("namespace", "unknown")
+                            
+                            if latest_value > 80:
+                                pod_info = all_pods_map.get(pod_name, {})
+                                labels = pod_info.get("labels", {})
+                                app_label = labels.get("app", labels.get("k8s-app", "unknown"))
+                                
+                                existing_pod = None
+                                for p in biz_pod_check["high_cpu_pods_top10"]:
+                                    if p["pod"] == pod_name and p["namespace"] == namespace:
+                                        existing_pod = p
+                                        break
+                                
+                                if existing_pod:
+                                    existing_pod["memory_usage_percent"] = round(latest_value, 2)
+                                else:
+                                    resource_info = {
+                                        "pod": pod_name,
+                                        "namespace": namespace,
+                                        "app": app_label,
+                                        "memory_usage_percent": round(latest_value, 2),
+                                        "node": pod_info.get("node", "Unknown"),
+                                        "status": "critical" if latest_value > 90 else "warning"
+                                    }
+                                    biz_pod_check["high_memory_pods_top10"].append(resource_info)
+                                add_issue("WARNING", "业务Pod内存使用率高", pod_name,
+                                    f"命名空间: {namespace}, 内存使用率: {round(latest_value, 2)}%, 节点: {pod_info.get('node', 'Unknown')}")
+                        except (ValueError, IndexError):
+                            pass
+        
+        # 设置业务巡检状态
+        if biz_pod_check["high_cpu_count"] > 0 or biz_pod_check["high_memory_count"] > 0:
+            biz_pod_check["status"] = "WARN"
+            
+    else:
+        addon_pod_check["status"] = "SKIP"
+        addon_pod_check["message"] = "未找到CCE类型的AOM实例"
+        biz_pod_check["status"] = "SKIP"
+        biz_pod_check["message"] = "未找到CCE类型的AOM实例"
+    
+    inspection["checks"]["addon_pod_monitoring"] = addon_pod_check
+    inspection["checks"]["biz_pod_monitoring"] = biz_pod_check
+    
+    # ========== 5. 节点资源监控巡检 ==========
+    node_mon_check = {
+        "name": "节点资源监控巡检",
+        "status": "PASS",
+        "checked": False,
+        "high_cpu_count": 0,
+        "high_memory_count": 0,
+        "high_disk_count": 0,
+        "high_cpu_nodes_top10": [],
+        "high_memory_nodes_top10": [],
+        "high_disk_nodes_top10": [],
+        "all_high_resource_nodes": []  # 所有高资源使用节点
+    }
+    
+    if aom_instance_id:
+        node_mon_check["checked"] = True
+        node_mon_check["aom_instance_id"] = aom_instance_id
+        
+        # 获取节点信息映射（从Kubernetes API获取，节点名即IP）
+        node_info_map = {}
+        k8s_nodes_result = get_kubernetes_nodes(region, cluster_id, access_key, secret_key, proj_id)
+        if k8s_nodes_result.get("success"):
+            for node in k8s_nodes_result.get("nodes", []):
+                node_name = node.get("name", "")  # Kubernetes节点名即IP
+                if node_name:
+                    node_info_map[node_name] = {
+                        "name": node_name,
+                        "ip": node_name,
+                        "status": node.get("status", "Unknown")
+                    }
+        
+        # ===== 第一步：查询CPU使用率大于80%的节点数量 =====
+        cpu_count_query = "count(100 - (avg by (instance) (irate(node_cpu_seconds_total{mode='idle', cluster_name='" + cluster_name + "'}[5m])) * 100) > 80)"
+        cpu_count_result = get_aom_prom_metrics_http(region, aom_instance_id, cpu_count_query, ak=access_key, sk=secret_key, project_id=proj_id)
+        
+        if cpu_count_result.get("success") and cpu_count_result.get("result", {}).get("data", {}).get("result"):
+            for item in cpu_count_result["result"]["data"]["result"]:
+                values = item.get("values", [])
+                if values:
+                    try:
+                        latest_value = float(values[-1][1])
+                        node_mon_check["high_cpu_count"] = int(latest_value)
+                    except (ValueError, IndexError):
+                        pass
+        
+        # ===== 第二步：如果CPU高使用率节点数量>0，获取Top 10详细信息 =====
+        if node_mon_check["high_cpu_count"] > 0:
+            cpu_top10_query = "topk(10, 100 - (avg by (instance) (irate(node_cpu_seconds_total{mode='idle', cluster_name='" + cluster_name + "'}[5m])) * 100))"
+            cpu_top10_result = get_aom_prom_metrics_http(region, aom_instance_id, cpu_top10_query, ak=access_key, sk=secret_key, project_id=proj_id)
+            
+            if cpu_top10_result.get("success") and cpu_top10_result.get("result", {}).get("data", {}).get("result"):
+                for item in cpu_top10_result["result"]["data"]["result"]:
+                    metric = item.get("metric", {})
+                    values = item.get("values", [])
+                    if values:
+                        try:
+                            latest_value = float(values[-1][1])
+                            instance = metric.get("instance", "unknown")
+                            instance_ip = instance.split(":")[0] if ":" in instance else instance
+                            
+                            # 只添加使用率大于80%的节点
+                            if latest_value > 80:
+                                node_info = node_info_map.get(instance_ip, {})
+                                
+                                resource_info = {
+                                    "instance": instance,
+                                    "node_ip": instance_ip,
+                                    "node_name": node_info.get("name", instance_ip),
+                                    "cpu_usage_percent": round(latest_value, 2),
+                                    "status": "critical" if latest_value > 90 else "warning"
+                                }
+                                node_mon_check["high_cpu_nodes_top10"].append(resource_info)
+                                
+                                # 添加到问题列表
+                                add_issue("WARNING", "节点CPU高", instance_ip,
+                                    f"节点: {instance_ip}, CPU使用率: {round(latest_value, 2)}%")
+                        except (ValueError, IndexError):
+                            pass
+        
+        # ===== 第三步：查询内存使用率大于80%的节点数量 =====
+        mem_count_query = "count(avg by (instance) ((1 - node_memory_MemAvailable_bytes{cluster_name='" + cluster_name + "'} / node_memory_MemTotal_bytes{cluster_name='" + cluster_name + "'})) * 100 > 80)"
+        mem_count_result = get_aom_prom_metrics_http(region, aom_instance_id, mem_count_query, ak=access_key, sk=secret_key, project_id=proj_id)
+        
+        if mem_count_result.get("success") and mem_count_result.get("result", {}).get("data", {}).get("result"):
+            for item in mem_count_result["result"]["data"]["result"]:
+                values = item.get("values", [])
+                if values:
+                    try:
+                        latest_value = float(values[-1][1])
+                        node_mon_check["high_memory_count"] = int(latest_value)
+                    except (ValueError, IndexError):
+                        pass
+        
+        # ===== 第四步：如果内存高使用率节点数量>0，获取Top 10详细信息 =====
+        if node_mon_check["high_memory_count"] > 0:
+            mem_top10_query = "topk(10, avg by (instance) ((1 - node_memory_MemAvailable_bytes{cluster_name='" + cluster_name + "'} / node_memory_MemTotal_bytes{cluster_name='" + cluster_name + "'})) * 100)"
+            mem_top10_result = get_aom_prom_metrics_http(region, aom_instance_id, mem_top10_query, ak=access_key, sk=secret_key, project_id=proj_id)
+            
+            if mem_top10_result.get("success") and mem_top10_result.get("result", {}).get("data", {}).get("result"):
+                for item in mem_top10_result["result"]["data"]["result"]:
+                    metric = item.get("metric", {})
+                    values = item.get("values", [])
+                    if values:
+                        try:
+                            latest_value = float(values[-1][1])
+                            instance = metric.get("instance", "unknown")
+                            instance_ip = instance.split(":")[0] if ":" in instance else instance
+                            
+                            # 只添加使用率大于80%的节点
+                            if latest_value > 80:
+                                node_info = node_info_map.get(instance_ip, {})
+                                
+                                # 检查是否已在CPU Top10中
+                                existing_node = None
+                                for n in node_mon_check["high_cpu_nodes_top10"]:
+                                    if n["node_ip"] == instance_ip:
+                                        existing_node = n
+                                        break
+                                
+                                if existing_node:
+                                    existing_node["memory_usage_percent"] = round(latest_value, 2)
+                                else:
+                                    resource_info = {
+                                        "instance": instance,
+                                        "node_ip": instance_ip,
+                                        "node_name": node_info.get("name", instance_ip),
+                                        "memory_usage_percent": round(latest_value, 2),
+                                        "status": "critical" if latest_value > 90 else "warning"
+                                    }
+                                    node_mon_check["high_memory_nodes_top10"].append(resource_info)
+                                
+                                # 添加到问题列表
+                                add_issue("WARNING", "节点内存高", instance_ip,
+                                    f"节点: {instance_ip}, 内存使用率: {round(latest_value, 2)}%")
+                        except (ValueError, IndexError):
+                            pass
+        
+        # ===== 第五步：查询磁盘使用率大于80%的节点数量 =====
+        disk_count_query = "count(avg by (instance) ((1 - node_filesystem_avail_bytes{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',cluster_name='" + cluster_name + "'} / node_filesystem_size_bytes{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',cluster_name='" + cluster_name + "'})) * 100 > 80)"
+        disk_count_result = get_aom_prom_metrics_http(region, aom_instance_id, disk_count_query, ak=access_key, sk=secret_key, project_id=proj_id)
+        
+        if disk_count_result.get("success") and disk_count_result.get("result", {}).get("data", {}).get("result"):
+            for item in disk_count_result["result"]["data"]["result"]:
+                values = item.get("values", [])
+                if values:
+                    try:
+                        latest_value = float(values[-1][1])
+                        node_mon_check["high_disk_count"] = int(latest_value)
+                    except (ValueError, IndexError):
+                        pass
+        
+        # ===== 第六步：如果磁盘高使用率节点数量>0，获取Top 10详细信息 =====
+        if node_mon_check["high_disk_count"] > 0:
+            disk_top10_query = "topk(10, avg by (instance) ((1 - node_filesystem_avail_bytes{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',cluster_name='" + cluster_name + "'} / node_filesystem_size_bytes{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',cluster_name='" + cluster_name + "'})) * 100)"
+            disk_top10_result = get_aom_prom_metrics_http(region, aom_instance_id, disk_top10_query, ak=access_key, sk=secret_key, project_id=proj_id)
+            
+            if disk_top10_result.get("success") and disk_top10_result.get("result", {}).get("data", {}).get("result"):
+                for item in disk_top10_result["result"]["data"]["result"]:
+                    metric = item.get("metric", {})
+                    values = item.get("values", [])
+                    if values:
+                        try:
+                            latest_value = float(values[-1][1])
+                            instance = metric.get("instance", "unknown")
+                            instance_ip = instance.split(":")[0] if ":" in instance else instance
+                            
+                            # 只添加使用率大于80%的节点
+                            if latest_value > 80:
+                                node_info = node_info_map.get(instance_ip, {})
+                                
+                                # 检查是否已在CPU或内存Top10中
+                                existing_node = None
+                                for n in node_mon_check["high_cpu_nodes_top10"]:
+                                    if n["node_ip"] == instance_ip:
+                                        existing_node = n
+                                        break
+                                if not existing_node:
+                                    for n in node_mon_check["high_memory_nodes_top10"]:
+                                        if n["node_ip"] == instance_ip:
+                                            existing_node = n
+                                            break
+                                
+                                if existing_node:
+                                    existing_node["disk_usage_percent"] = round(latest_value, 2)
+                                else:
+                                    resource_info = {
+                                        "instance": instance,
+                                        "node_ip": instance_ip,
+                                        "node_name": node_info.get("name", instance_ip),
+                                        "disk_usage_percent": round(latest_value, 2),
+                                        "status": "critical" if latest_value > 90 else "warning"
+                                    }
+                                    node_mon_check["high_disk_nodes_top10"].append(resource_info)
+                                
+                                # 添加到问题列表
+                                add_issue("WARNING", "节点磁盘高", instance_ip,
+                                    f"节点: {instance_ip}, 磁盘使用率: {round(latest_value, 2)}%")
+                        except (ValueError, IndexError):
+                            pass
+        
+        # 合并所有高资源使用节点
+        all_nodes_map_temp = {}
+        for n in node_mon_check["high_cpu_nodes_top10"]:
+            key = n["node_ip"]
+            all_nodes_map_temp[key] = n
+        for n in node_mon_check["high_memory_nodes_top10"]:
+            key = n["node_ip"]
+            if key in all_nodes_map_temp:
+                all_nodes_map_temp[key]["memory_usage_percent"] = n.get("memory_usage_percent")
+            else:
+                all_nodes_map_temp[key] = n
+        for n in node_mon_check["high_disk_nodes_top10"]:
+            key = n["node_ip"]
+            if key in all_nodes_map_temp:
+                all_nodes_map_temp[key]["disk_usage_percent"] = n.get("disk_usage_percent")
+            else:
+                all_nodes_map_temp[key] = n
+        node_mon_check["all_high_resource_nodes"] = list(all_nodes_map_temp.values())
+        
+        # 设置状态
+        if node_mon_check["high_cpu_count"] > 0 or node_mon_check["high_memory_count"] > 0 or node_mon_check["high_disk_count"] > 0:
+            node_mon_check["status"] = "WARN"
+    else:
+        node_mon_check["status"] = "SKIP"
+        node_mon_check["message"] = "未找到CCE类型的AOM实例，无法获取监控数据"
+    
+    inspection["checks"]["node_monitoring"] = node_mon_check
+    
+    # ========== 5. Event巡检 ==========
+    event_check = {
+        "name": "Event巡检",
+        "status": "PASS",
+        "total": 0,
+        "normal": 0,
+        "warning": 0,
+        "critical_events": [],
+        "events_by_reason": {},  # 按原因归一统计
+        "events_by_namespace": {}  # 按命名空间统计
+    }
+    
+    event_result = get_kubernetes_events(region, cluster_id, access_key, secret_key, proj_id)
+    if event_result.get("success"):
+        events = event_result.get("events", [])
+        event_check["total"] = len(events)
+        
+        critical_keywords = ["Failed", "Error", "CrashLoopBackOff", "OOMKilled", "Evicted", "Insufficient", "BackOff", "Unhealthy", "Killing", "FailedScheduling"]
+        
+        for event in events:
+            event_type = event.get("type", "")
+            reason = event.get("reason", "")
+            message = event.get("message", "")
+            namespace = event.get("namespace", "default")
+            involved_obj = event.get("involved_object", {})
+            obj_name = involved_obj.get("name", "Unknown")
+            obj_kind = involved_obj.get("kind", "Unknown")
+            count = event.get("count", 1)
+            first_seen = event.get("first_timestamp", "")
+            last_seen = event.get("last_timestamp", "")
+            
+            # 按命名空间统计
+            if namespace not in event_check["events_by_namespace"]:
+                event_check["events_by_namespace"][namespace] = {"total": 0, "warning": 0, "critical": 0}
+            event_check["events_by_namespace"][namespace]["total"] += 1
+            
+            if event_type == "Warning":
+                event_check["warning"] += 1
+                event_check["events_by_namespace"][namespace]["warning"] += 1
+                
+                is_critical = any(kw in reason or kw in message for kw in critical_keywords)
+                
+                # 按原因归一统计
+                reason_key = f"{namespace}/{reason}"
+                if reason_key not in event_check["events_by_reason"]:
+                    event_check["events_by_reason"][reason_key] = {
+                        "reason": reason,
+                        "namespace": namespace,
+                        "count": 0,
+                        "objects": [],
+                        "severity": "critical" if is_critical else "warning"
+                    }
+                event_check["events_by_reason"][reason_key]["count"] += count
+                if obj_name not in event_check["events_by_reason"][reason_key]["objects"]:
+                    event_check["events_by_reason"][reason_key]["objects"].append(obj_name)
+                
+                if is_critical:
+                    event_check["events_by_namespace"][namespace]["critical"] += 1
+                    event_info = {
+                        "reason": reason,
+                        "message": message[:500],
+                        "count": count,
+                        "namespace": namespace,
+                        "involved_object": obj_name,
+                        "object_kind": obj_kind,
+                        "first_seen": first_seen,
+                        "last_seen": last_seen
+                    }
+                    event_check["critical_events"].append(event_info)
+            else:
+                event_check["normal"] += 1
+        
+        if event_check["critical_events"]:
+            event_check["status"] = "WARN"
+            # 添加关键事件到问题列表（按原因归一）
+            for reason_key, reason_data in event_check["events_by_reason"].items():
+                if reason_data["severity"] == "critical":
+                    affected_objects = ", ".join(reason_data["objects"][:5])
+                    if len(reason_data["objects"]) > 5:
+                        affected_objects += f" 等共{len(reason_data['objects'])}个对象"
+                    add_issue("WARNING", "关键事件", reason_data["reason"],
+                        f"命名空间: {reason_data['namespace']}, 原因: {reason_data['reason']}, 累计次数: {reason_data['count']}, 影响对象: {affected_objects}")
+    
+    inspection["checks"]["events"] = event_check
+    
+    # ========== 6. AOM告警巡检 ==========
+    alarm_check = {
+        "name": "AOM告警巡检",
+        "status": "PASS",
+        "total": 0,
+        "cluster_alarms": [],
+        "severity_breakdown": {"Critical": 0, "Major": 0, "Minor": 0, "Info": 0},
+        "alarms_by_type": {},  # 按告警类型归一
+        "alarms_by_resource": {}  # 按资源类型归一
+    }
+    
+    alarm_result = list_aom_current_alarms(region, access_key, secret_key, proj_id, event_type="active_alert")
+    if alarm_result.get("success"):
+        events = alarm_result.get("events", [])
+        alarm_check["total"] = len(events)
+        
+        for event in events:
+            cluster_name = event.get("cluster_name", "")
+            cluster_id_in_event = event.get("cluster_id", "")
+            severity = event.get("event_severity", "Info")
+            event_name = event.get("event_name", "Unknown")
+            message = event.get("message", "")
+            resource_type = event.get("resource_type", "Unknown")
+            resource_id = event.get("resource_id", "")
+            starts_at = event.get("starts_at", "")
+            
+            # 过滤当前集群的告警
+            if cluster_id == cluster_id_in_event or cluster_name:
+                alarm_check["severity_breakdown"][severity] = alarm_check["severity_breakdown"].get(severity, 0) + 1
+                
+                alarm_info = {
+                    "name": event_name,
+                    "severity": severity,
+                    "cluster": cluster_name or cluster_id_in_event,
+                    "message": message[:500],
+                    "resource_type": resource_type,
+                    "resource_id": resource_id,
+                    "starts_at": starts_at
+                }
+                alarm_check["cluster_alarms"].append(alarm_info)
+                
+                # 按告警类型归一
+                alarm_type = event_name.split("##")[0] if "##" in event_name else event_name
+                if alarm_type not in alarm_check["alarms_by_type"]:
+                    alarm_check["alarms_by_type"][alarm_type] = {
+                        "type": alarm_type,
+                        "count": 0,
+                        "severity": severity,
+                        "resources": [],
+                        "messages": []
+                    }
+                alarm_check["alarms_by_type"][alarm_type]["count"] += 1
+                if resource_id and resource_id not in alarm_check["alarms_by_type"][alarm_type]["resources"]:
+                    alarm_check["alarms_by_type"][alarm_type]["resources"].append(resource_id)
+                if message and message not in alarm_check["alarms_by_type"][alarm_type]["messages"]:
+                    alarm_check["alarms_by_type"][alarm_type]["messages"].append(message[:200])
+                
+                # 按资源类型归一
+                if resource_type not in alarm_check["alarms_by_resource"]:
+                    alarm_check["alarms_by_resource"][resource_type] = {"type": resource_type, "count": 0, "alarms": []}
+                alarm_check["alarms_by_resource"][resource_type]["count"] += 1
+                alarm_check["alarms_by_resource"][resource_type]["alarms"].append(alarm_info)
+                
+                if severity == "Critical":
+                    add_issue("CRITICAL", "严重告警", event_name,
+                        f"告警类型: {alarm_type}, 资源: {resource_type}/{resource_id}, 消息: {message[:200]}")
+                elif severity == "Major":
+                    add_issue("WARNING", "重要告警", event_name,
+                        f"告警类型: {alarm_type}, 资源: {resource_type}/{resource_id}, 消息: {message[:200]}")
+        
+        if alarm_check["severity_breakdown"]["Critical"] > 0:
+            alarm_check["status"] = "FAIL"
+        elif alarm_check["severity_breakdown"]["Major"] > 0:
+            alarm_check["status"] = "WARN"
+    
+    inspection["checks"]["alarms"] = alarm_check
+    
+    # ========== 7. ELB监控巡检 ==========
+    elb_check = {
+        "name": "ELB负载均衡监控巡检",
+        "status": "PASS",
+        "checked": False,
+        "loadbalancer_services": [],
+        "elb_metrics": [],
+        "eip_metrics": [],  # 新增: EIP监控数据
+        "high_bandwidth_usage_elbs": [],
+        "high_connection_usage_elbs": [],
+        "high_bandwidth_eips": [],  # 新增: 高带宽使用EIP
+        "total_loadbalancers": 0
+    }
+    
+    if aom_instance_id:
+        elb_check["checked"] = True
+        
+        # 获取所有Service，筛选LoadBalancer类型
+        try:
+            services_result = get_kubernetes_services(region, cluster_id, access_key, secret_key, proj_id)
+            
+            # 获取区域所有EIP，用于匹配ELB的公网IP
+            eip_list_result = list_eip_addresses(region, access_key, secret_key, proj_id)
+            eip_map = {}  # IP -> EIP信息
+            if eip_list_result.get("success"):
+                for eip in eip_list_result.get("eips", []):
+                    eip_map[eip.get("ip_address")] = eip
+            
+            if services_result.get("success"):
+                lb_services = []
+                for svc in services_result.get("services", []):
+                    if svc.get("type") == "LoadBalancer":
+                        # 从annotations中提取ELB ID
+                        annotations = svc.get("annotations", {})
+                        elb_id = annotations.get("kubernetes.io/elb.id", "")
+                        
+                        if elb_id:
+                            lb_services.append({
+                                "service_name": svc.get("name"),
+                                "namespace": svc.get("namespace"),
+                                "elb_id": elb_id,
+                                "cluster_ip": svc.get("cluster_ip"),
+                                "load_balancer_ip": svc.get("load_balancer_ip"),
+                                "ports": svc.get("ports", []),
+                                "annotations": annotations
+                            })
+                
+                elb_check["loadbalancer_services"] = lb_services
+                elb_check["total_loadbalancers"] = len(lb_services)
+                
+                # 获取每个ELB的监控数据
+                for lb_svc in lb_services:
+                    elb_id = lb_svc.get("elb_id")
+                    if elb_id:
+                        try:
+                            # 获取ELB监控数据 (使用V3指标)
+                            elb_metrics_result = get_elb_metrics(region, elb_id, access_key, secret_key, proj_id)
+                            
+                            if elb_metrics_result.get("success"):
+                                summary = elb_metrics_result.get("summary", {})
+                                metrics = elb_metrics_result.get("metrics", {})
+                                
+                                # 提取关键指标 (V3)
+                                connection_num = summary.get("connection_num")
+                                in_bandwidth = summary.get("in_bandwidth_bps")
+                                l7_qps = summary.get("l7_qps")
+                                
+                                # 使用率指标 (关键!)
+                                l7_con_usage = summary.get("l7_connection_usage")
+                                l7_bw_usage = summary.get("l7_bandwidth_usage")
+                                l4_con_usage = summary.get("l4_connection_usage")
+                                l4_bw_usage = summary.get("l4_bandwidth_usage")
+                                
+                                # 后端服务器状态
+                                abnormal_servers = summary.get("abnormal_servers", 0)
+                                normal_servers = summary.get("normal_servers", 0)
+                                
+                                elb_info = {
+                                    "service_name": lb_svc.get("service_name"),
+                                    "namespace": lb_svc.get("namespace"),
+                                    "elb_id": elb_id,
+                                    "elb_ip": lb_svc.get("load_balancer_ip"),
+                                    "elb_type": elb_metrics_result.get("elb_type", "未知"),
+                                    # 绝对值指标
+                                    "connection_num": connection_num,
+                                    "in_bandwidth_bps": in_bandwidth,
+                                    "l7_qps": l7_qps,
+                                    # 使用率指标 (%)
+                                    "l7_connection_usage_percent": l7_con_usage,
+                                    "l7_bandwidth_usage_percent": l7_bw_usage,
+                                    "l4_connection_usage_percent": l4_con_usage,
+                                    "l4_bandwidth_usage_percent": l4_bw_usage,
+                                    # 后端状态
+                                    "abnormal_servers": abnormal_servers,
+                                    "normal_servers": normal_servers,
+                                    "metrics_detail": metrics
+                                }
+                                
+                                # ===== 检查ELB是否有公网EIP =====
+                                lb_ip = lb_svc.get("load_balancer_ip")
+                                if lb_ip:
+                                    # 检查是否是公网IP（在eip_map中）
+                                    eip_info = eip_map.get(lb_ip)
+                                    if eip_info:
+                                        eip_id = eip_info.get("id")
+                                        elb_info["has_public_eip"] = True
+                                        elb_info["public_ip"] = lb_ip
+                                        elb_info["eip_id"] = eip_id
+                                        
+                                        # 获取EIP监控数据
+                                        eip_metrics_result = get_eip_metrics(region, eip_id, access_key, secret_key, proj_id)
+                                        if eip_metrics_result.get("success"):
+                                            eip_summary = eip_metrics_result.get("summary", {})
+                                            bw_in = eip_summary.get("bw_usage_in_percent")
+                                            bw_out = eip_summary.get("bw_usage_out_percent")
+                                            
+                                            elb_info["eip_bw_usage_in_percent"] = bw_in
+                                            elb_info["eip_bw_usage_out_percent"] = bw_out
+                                            elb_info["eip_connection_num"] = eip_summary.get("connection_num")
+                                            
+                                            # 保存EIP监控详情
+                                            elb_check["eip_metrics"].append({
+                                                "service_name": lb_svc.get("service_name"),
+                                                "namespace": lb_svc.get("namespace"),
+                                                "eip_id": eip_id,
+                                                "public_ip": lb_ip,
+                                                "bw_usage_in_percent": bw_in,
+                                                "bw_usage_out_percent": bw_out,
+                                                "connection_num": eip_summary.get("connection_num")
+                                            })
+                                            
+                                            # 检查EIP带宽是否超限 (>80%)
+                                            if bw_in and bw_in > 80:
+                                                elb_check["high_bandwidth_eips"].append({
+                                                    "service": lb_svc.get("service_name"),
+                                                    "namespace": lb_svc.get("namespace"),
+                                                    "eip_id": eip_id,
+                                                    "public_ip": lb_ip,
+                                                    "direction": "in",
+                                                    "usage_percent": round(bw_in, 2),
+                                                    "status": "critical" if bw_in > 90 else "warning"
+                                                })
+                                                add_issue("WARNING", "EIP入带宽超限", eip_id,
+                                                    f"Service: {lb_svc.get('namespace')}/{lb_svc.get('service_name')}, 公网IP: {lb_ip}, 入带宽使用率: {round(bw_in, 2)}%")
+                                            
+                                            if bw_out and bw_out > 80:
+                                                elb_check["high_bandwidth_eips"].append({
+                                                    "service": lb_svc.get("service_name"),
+                                                    "namespace": lb_svc.get("namespace"),
+                                                    "eip_id": eip_id,
+                                                    "public_ip": lb_ip,
+                                                    "direction": "out",
+                                                    "usage_percent": round(bw_out, 2),
+                                                    "status": "critical" if bw_out > 90 else "warning"
+                                                })
+                                                add_issue("WARNING", "EIP出带宽超限", eip_id,
+                                                    f"Service: {lb_svc.get('namespace')}/{lb_svc.get('service_name')}, 公网IP: {lb_ip}, 出带宽使用率: {round(bw_out, 2)}%")
+                                    else:
+                                        elb_info["has_public_eip"] = False
+                                        elb_info["note"] = "内网ELB，无公网EIP"
+                                
+                                elb_check["elb_metrics"].append(elb_info)
+                                
+                                # 判断是否达到瓶颈 (使用率 > 80%)
+                                usage_threshold = 80
+                                
+                                # 7层连接使用率
+                                if l7_con_usage and l7_con_usage > usage_threshold:
+                                    elb_check["high_connection_usage_elbs"].append({
+                                        "service": lb_svc.get("service_name"),
+                                        "namespace": lb_svc.get("namespace"),
+                                        "elb_id": elb_id,
+                                        "layer": "L7",
+                                        "usage_percent": round(l7_con_usage, 2),
+                                        "status": "critical" if l7_con_usage > 90 else "warning"
+                                    })
+                                    add_issue("WARNING", "ELB连接使用率高", elb_id,
+                                        f"Service: {lb_svc.get('namespace')}/{lb_svc.get('service_name')}, 7层连接使用率: {round(l7_con_usage, 2)}%")
+                                
+                                # 7层带宽使用率
+                                if l7_bw_usage and l7_bw_usage > usage_threshold:
+                                    elb_check["high_bandwidth_usage_elbs"].append({
+                                        "service": lb_svc.get("service_name"),
+                                        "namespace": lb_svc.get("namespace"),
+                                        "elb_id": elb_id,
+                                        "layer": "L7",
+                                        "usage_percent": round(l7_bw_usage, 2),
+                                        "status": "critical" if l7_bw_usage > 90 else "warning"
+                                    })
+                                    add_issue("WARNING", "ELB带宽使用率高", elb_id,
+                                        f"Service: {lb_svc.get('namespace')}/{lb_svc.get('service_name')}, 7层带宽使用率: {round(l7_bw_usage, 2)}%")
+                                
+                                # 4层连接使用率
+                                if l4_con_usage and l4_con_usage > usage_threshold:
+                                    elb_check["high_connection_usage_elbs"].append({
+                                        "service": lb_svc.get("service_name"),
+                                        "namespace": lb_svc.get("namespace"),
+                                        "elb_id": elb_id,
+                                        "layer": "L4",
+                                        "usage_percent": round(l4_con_usage, 2),
+                                        "status": "critical" if l4_con_usage > 90 else "warning"
+                                    })
+                                    add_issue("WARNING", "ELB连接使用率高", elb_id,
+                                        f"Service: {lb_svc.get('namespace')}/{lb_svc.get('service_name')}, 4层连接使用率: {round(l4_con_usage, 2)}%")
+                                
+                                # 4层带宽使用率
+                                if l4_bw_usage and l4_bw_usage > usage_threshold:
+                                    elb_check["high_bandwidth_usage_elbs"].append({
+                                        "service": lb_svc.get("service_name"),
+                                        "namespace": lb_svc.get("namespace"),
+                                        "elb_id": elb_id,
+                                        "layer": "L4",
+                                        "usage_percent": round(l4_bw_usage, 2),
+                                        "status": "critical" if l4_bw_usage > 90 else "warning"
+                                    })
+                                    add_issue("WARNING", "ELB带宽使用率高", elb_id,
+                                        f"Service: {lb_svc.get('namespace')}/{lb_svc.get('service_name')}, 4层带宽使用率: {round(l4_bw_usage, 2)}%")
+                                
+                                # 后端异常服务器
+                                if abnormal_servers and abnormal_servers > 0:
+                                    add_issue("WARNING", "ELB后端服务器异常", elb_id,
+                                        f"Service: {lb_svc.get('namespace')}/{lb_svc.get('service_name')}, 异常服务器数: {abnormal_servers}")
+                                
+                            else:
+                                elb_check["elb_metrics"].append({
+                                    "service_name": lb_svc.get("service_name"),
+                                    "namespace": lb_svc.get("namespace"),
+                                    "elb_id": elb_id,
+                                    "error": elb_metrics_result.get("error", "获取监控数据失败"),
+                                    "note": "共享型ELB不支持CES监控，建议升级为独享型ELB"
+                                })
+                                
+                        except Exception as e:
+                            elb_check["elb_metrics"].append({
+                                "service_name": lb_svc.get("service_name"),
+                                "namespace": lb_svc.get("namespace"),
+                                "elb_id": elb_id,
+                                "error": str(e)
+                            })
+                
+                # 设置状态
+                if elb_check["high_bandwidth_usage_elbs"] or elb_check["high_connection_usage_elbs"] or elb_check["high_bandwidth_eips"]:
+                    elb_check["status"] = "WARN"
+                    
+        except Exception as e:
+            elb_check["error"] = str(e)
+    else:
+        elb_check["status"] = "SKIP"
+        elb_check["message"] = "未找到CCE类型的AOM实例，无法获取监控数据"
+    
+    inspection["checks"]["elb_monitoring"] = elb_check
+    
+    # ========== 生成报告 ==========
+    report_lines = []
+    report_lines.append("=" * 70)
+    report_lines.append("CCE 集群巡检报告")
+    report_lines.append("=" * 70)
+    report_lines.append(f"集群ID: {cluster_id}")
+    report_lines.append(f"区域: {region}")
+    report_lines.append(f"巡检时间: {inspection['inspection_time']}")
+    report_lines.append(f"巡检结果: {inspection['result']['status']}")
+    report_lines.append(f"总问题数: {inspection['result']['total_issues']} (严重: {inspection['result']['critical_issues']}, 警告: {inspection['result']['warning_issues']})")
+    report_lines.append("")
+    
+    # 各项巡检结果
+    for check_name, check_data in inspection["checks"].items():
+        report_lines.append("-" * 70)
+        report_lines.append(f"【{check_data.get('name', check_name)}】 状态: {check_data.get('status', 'UNKNOWN')}")
+        
+        if check_name == "pods":
+            report_lines.append(f"  总Pod数: {check_data.get('total', 0)}")
+            report_lines.append(f"  运行中: {check_data.get('running', 0)}, 待调度: {check_data.get('pending', 0)}, 异常: {check_data.get('failed', 0)}")
+            if check_data.get("restart_pods"):
+                report_lines.append(f"  重启Pod: {len(check_data['restart_pods'])}个")
+                for rp in check_data["restart_pods"][:5]:
+                    report_lines.append(f"    - {rp['pod']}/{rp['namespace']}: {rp['container']} 重启{rp['restart_count']}次")
+            if check_data.get("abnormal_pods"):
+                report_lines.append(f"  异常Pod: {len(check_data['abnormal_pods'])}个")
+                for ap in check_data["abnormal_pods"][:5]:
+                    report_lines.append(f"    - {ap['pod']}/{ap['namespace']}: {ap['status']}")
+        
+        elif check_name == "nodes":
+            report_lines.append(f"  总节点数: {check_data.get('total', 0)}")
+            report_lines.append(f"  Ready: {check_data.get('ready', 0)}, NotReady: {check_data.get('not_ready', 0)}")
+            if check_data.get("abnormal_nodes"):
+                report_lines.append(f"  异常节点:")
+                for an in check_data["abnormal_nodes"]:
+                    report_lines.append(f"    - {an['name']} ({an['ip']}): {an['status']}")
+        
+        elif check_name == "addon_pod_monitoring":
+            if check_data.get("checked"):
+                report_lines.append(f"  命名空间: {', '.join(check_data.get('namespaces', []))}")
+                if check_data.get("high_cpu_count", 0) > 0:
+                    report_lines.append(f"  CPU>80%: {check_data['high_cpu_count']}个Pod")
+                    if check_data.get("high_cpu_pods_top10"):
+                        report_lines.append("  CPU使用率 Top 10:")
+                        for p in check_data["high_cpu_pods_top10"][:10]:
+                            status_icon = "🔴" if p.get("status") == "critical" else "🟡"
+                            report_lines.append(f"    {status_icon} {p['namespace']}/{p['pod']}: {p['cpu_usage_percent']}%")
+                else:
+                    report_lines.append("  CPU使用率: 无Pod超过80%阈值")
+                
+                if check_data.get("high_memory_count", 0) > 0:
+                    report_lines.append(f"  内存>80%: {check_data['high_memory_count']}个Pod")
+                    if check_data.get("high_memory_pods_top10"):
+                        report_lines.append("  内存使用率 Top 10:")
+                        for p in check_data["high_memory_pods_top10"][:10]:
+                            status_icon = "🔴" if p.get("status") == "critical" else "🟡"
+                            mem_val = p.get('memory_usage_percent', 'N/A')
+                            report_lines.append(f"    {status_icon} {p['namespace']}/{p['pod']}: {mem_val}%")
+                else:
+                    report_lines.append("  内存使用率: 无Pod超过80%阈值")
+                
+                if check_data.get("high_cpu_count", 0) == 0 and check_data.get("high_memory_count", 0) == 0:
+                    report_lines.append("  所有插件Pod资源使用正常")
+            else:
+                report_lines.append(f"  {check_data.get('message', '未检查')}")
+        
+        elif check_name == "biz_pod_monitoring":
+            if check_data.get("checked"):
+                namespaces = check_data.get('namespaces', [])
+                if namespaces:
+                    report_lines.append(f"  业务命名空间: {', '.join(namespaces[:5])}{'...' if len(namespaces) > 5 else ''}")
+                if check_data.get("high_cpu_count", 0) > 0:
+                    report_lines.append(f"  CPU>80%: {check_data['high_cpu_count']}个Pod")
+                    if check_data.get("high_cpu_pods_top10"):
+                        report_lines.append("  CPU使用率 Top 10:")
+                        for p in check_data["high_cpu_pods_top10"][:10]:
+                            status_icon = "🔴" if p.get("status") == "critical" else "🟡"
+                            report_lines.append(f"    {status_icon} {p['namespace']}/{p['pod']}: {p['cpu_usage_percent']}%")
+                else:
+                    report_lines.append("  CPU使用率: 无Pod超过80%阈值")
+                
+                if check_data.get("high_memory_count", 0) > 0:
+                    report_lines.append(f"  内存>80%: {check_data['high_memory_count']}个Pod")
+                    if check_data.get("high_memory_pods_top10"):
+                        report_lines.append("  内存使用率 Top 10:")
+                        for p in check_data["high_memory_pods_top10"][:10]:
+                            status_icon = "🔴" if p.get("status") == "critical" else "🟡"
+                            mem_val = p.get('memory_usage_percent', 'N/A')
+                            report_lines.append(f"    {status_icon} {p['namespace']}/{p['pod']}: {mem_val}%")
+                else:
+                    report_lines.append("  内存使用率: 无Pod超过80%阈值")
+                
+                if check_data.get("high_cpu_count", 0) == 0 and check_data.get("high_memory_count", 0) == 0:
+                    report_lines.append("  所有业务Pod资源使用正常")
+            else:
+                report_lines.append(f"  {check_data.get('message', '未检查')}")
+        
+        elif check_name == "node_monitoring":
+            if check_data.get("checked"):
+                # CPU 高使用率统计
+                if check_data.get("high_cpu_count", 0) > 0:
+                    report_lines.append(f"  CPU>80%: {check_data['high_cpu_count']}个节点")
+                    if check_data.get("high_cpu_nodes_top10"):
+                        report_lines.append("  CPU使用率 Top 10:")
+                        for n in check_data["high_cpu_nodes_top10"][:10]:
+                            status_icon = "🔴" if n.get("status") == "critical" else "🟡"
+                            report_lines.append(f"    {status_icon} {n['node_ip']}: {n['cpu_usage_percent']}%")
+                else:
+                    report_lines.append("  CPU使用率: 无节点超过80%阈值")
+                
+                # 内存高使用率统计
+                if check_data.get("high_memory_count", 0) > 0:
+                    report_lines.append(f"  内存>80%: {check_data['high_memory_count']}个节点")
+                    if check_data.get("high_memory_nodes_top10"):
+                        report_lines.append("  内存使用率 Top 10:")
+                        for n in check_data["high_memory_nodes_top10"][:10]:
+                            status_icon = "🔴" if n.get("status") == "critical" else "🟡"
+                            mem_val = n.get('memory_usage_percent', 'N/A')
+                            report_lines.append(f"    {status_icon} {n['node_ip']}: {mem_val}%")
+                else:
+                    report_lines.append("  内存使用率: 无节点超过80%阈值")
+                
+                # 磁盘高使用率统计
+                if check_data.get("high_disk_count", 0) > 0:
+                    report_lines.append(f"  磁盘>80%: {check_data['high_disk_count']}个节点")
+                    if check_data.get("high_disk_nodes_top10"):
+                        report_lines.append("  磁盘使用率 Top 10:")
+                        for n in check_data["high_disk_nodes_top10"][:10]:
+                            status_icon = "🔴" if n.get("status") == "critical" else "🟡"
+                            disk_val = n.get('disk_usage_percent', 'N/A')
+                            report_lines.append(f"    {status_icon} {n['node_ip']}: {disk_val}%")
+                else:
+                    report_lines.append("  磁盘使用率: 无节点超过80%阈值")
+                
+                # 如果都正常
+                if check_data.get("high_cpu_count", 0) == 0 and check_data.get("high_memory_count", 0) == 0 and check_data.get("high_disk_count", 0) == 0:
+                    report_lines.append("  所有节点资源使用正常")
+            else:
+                report_lines.append(f"  {check_data.get('message', '未检查')}")
+        
+        elif check_name == "events":
+            report_lines.append(f"  总事件: {check_data.get('total', 0)}, Normal: {check_data.get('normal', 0)}, Warning: {check_data.get('warning', 0)}")
+            if check_data.get("critical_events"):
+                report_lines.append(f"  关键事件: {len(check_data['critical_events'])}个")
+                for ce in check_data["critical_events"][:5]:
+                    report_lines.append(f"    - [{ce.get('reason')}] {ce.get('involved_object')}: {ce.get('message', '')[:60]}...")
+        
+        elif check_name == "alarms":
+            report_lines.append(f"  总告警: {check_data.get('total', 0)}")
+            sb = check_data.get("severity_breakdown", {})
+            report_lines.append(f"  严重级别: Critical={sb.get('Critical', 0)}, Major={sb.get('Major', 0)}, Minor={sb.get('Minor', 0)}, Info={sb.get('Info', 0)}")
+            if check_data.get("cluster_alarms"):
+                report_lines.append(f"  集群告警: {len(check_data['cluster_alarms'])}个")
+                for ca in check_data["cluster_alarms"][:5]:
+                    report_lines.append(f"    - [{ca['severity']}] {ca['name']}: {ca.get('message', '')[:60]}...")
+        
+        elif check_name == "elb_monitoring":
+            if check_data.get("checked"):
+                report_lines.append(f"  LoadBalancer Service数: {check_data.get('total_loadbalancers', 0)}")
+                if check_data.get("loadbalancer_services"):
+                    report_lines.append(f"  LoadBalancer服务列表:")
+                    for lb in check_data["loadbalancer_services"]:
+                        report_lines.append(f"    - {lb['namespace']}/{lb['service_name']}: ELB ID: {lb['elb_id']}")
+                if check_data.get("high_connection_usage_elbs"):
+                    report_lines.append(f"  高连接使用率ELB: {len(check_data['high_connection_usage_elbs'])}个")
+                    for lb in check_data["high_connection_usage_elbs"]:
+                        report_lines.append(f"    - {lb['namespace']}/{lb['service']}: {lb.get('layer', 'L4')}连接使用率 {lb['usage_percent']}%")
+                if check_data.get("high_bandwidth_usage_elbs"):
+                    report_lines.append(f"  高带宽使用率ELB: {len(check_data['high_bandwidth_usage_elbs'])}个")
+                    for lb in check_data["high_bandwidth_usage_elbs"]:
+                        report_lines.append(f"    - {lb['namespace']}/{lb['service']}: {lb.get('layer', 'L4')}带宽使用率 {lb['usage_percent']}%")
+                # EIP带宽检查
+                if check_data.get("high_bandwidth_eips"):
+                    report_lines.append(f"  EIP带宽超限: {len(check_data['high_bandwidth_eips'])}个")
+                    for eip in check_data["high_bandwidth_eips"]:
+                        direction = "入" if eip.get("direction") == "in" else "出"
+                        report_lines.append(f"    - {eip['namespace']}/{eip['service']} ({eip['public_ip']}): {direction}带宽使用率 {eip['usage_percent']}%")
+                if not check_data.get("high_connection_usage_elbs") and not check_data.get("high_bandwidth_usage_elbs") and not check_data.get("high_bandwidth_eips"):
+                    report_lines.append("  所有ELB和EIP负载正常")
+            else:
+                report_lines.append(f"  {check_data.get('message', '未检查')}")
+        
+        report_lines.append("")
+    
+    # 问题汇总
+    if inspection["issues"]:
+        report_lines.append("=" * 70)
+        report_lines.append("【问题汇总】")
+        report_lines.append("=" * 70)
+        
+        critical_issues = [i for i in inspection["issues"] if i["severity"] == "CRITICAL"]
+        warning_issues = [i for i in inspection["issues"] if i["severity"] == "WARNING"]
+        
+        if critical_issues:
+            report_lines.append(f"\n严重问题 ({len(critical_issues)}个):")
+            for i, issue in enumerate(critical_issues, 1):
+                report_lines.append(f"  {i}. [{issue['category']}] {issue['item']}")
+                report_lines.append(f"     {issue['details']}")
+        
+        if warning_issues:
+            report_lines.append(f"\n警告问题 ({len(warning_issues)}个):")
+            for i, issue in enumerate(warning_issues[:10], 1):
+                report_lines.append(f"  {i}. [{issue['category']}] {issue['item']}")
+                report_lines.append(f"     {issue['details']}")
+        
+        report_lines.append("")
+    
+    report_lines.append("=" * 70)
+    if inspection["result"]["status"] == "HEALTHY":
+        report_lines.append("✅ 集群状态健康，无异常问题")
+    elif inspection["result"]["status"] == "WARNING":
+        report_lines.append(f"⚠️ 集群存在警告问题，建议关注处理")
+    else:
+        report_lines.append(f"❌ 集群存在严重问题，请立即处理！")
+    report_lines.append("=" * 70)
+    
+    inspection["report"] = "\n".join(report_lines)
+    
+    # ========== 生成HTML报告 ==========
+    html_report = generate_inspection_html_report(inspection, cluster_id, region)
+    inspection["html_report"] = html_report
+    
+    return inspection
+
+
+def generate_inspection_html_report(inspection: dict, cluster_id: str, region: str) -> str:
+    """生成巡检HTML报告
+    
+    Args:
+        inspection: 巡检结果数据
+        cluster_id: 集群ID
+        region: 区域
+    
+    Returns:
+        HTML格式的巡检报告
+    """
+    import time as time_module
+    
+    # 状态样式映射
+    status_colors = {
+        "PASS": "#28a745",
+        "WARN": "#ffc107", 
+        "FAIL": "#dc3545",
+        "SKIP": "#6c757d",
+        "HEALTHY": "#28a745",
+        "WARNING": "#ffc107",
+        "CRITICAL": "#dc3545"
+    }
+    
+    status_icons = {
+        "PASS": "✅",
+        "WARN": "⚠️",
+        "FAIL": "❌",
+        "SKIP": "⏭️",
+        "HEALTHY": "✅",
+        "WARNING": "⚠️",
+        "CRITICAL": "❌"
+    }
+    
+    # 问题严重程度建议
+    issue_solutions = {
+        "Pod异常重启": {
+            "description": "Pod容器频繁重启，可能导致服务不稳定",
+            "solutions": [
+                "检查容器日志：kubectl logs <pod-name> -n <namespace>",
+                "检查容器资源限制是否合理",
+                "检查应用健康检查配置（livenessProbe/readinessProbe）",
+                "检查应用是否有未捕获的异常导致进程退出",
+                "检查环境变量和配置是否正确"
+            ]
+        },
+        "Pod CPU使用率高": {
+            "description": "Pod CPU使用率超过阈值，可能影响应用性能",
+            "solutions": [
+                "增加Pod的CPU limit配置",
+                "配置HPA实现自动水平扩缩容",
+                "排查应用是否存在性能瓶颈或死循环",
+                "考虑将服务拆分或优化代码"
+            ]
+        },
+        "Pod内存使用率高": {
+            "description": "Pod内存使用率超过阈值，可能发生OOM",
+            "solutions": [
+                "增加Pod的内存limit配置",
+                "排查应用是否存在内存泄漏",
+                "优化应用的内存使用策略",
+                "考虑使用对象池等技术减少内存分配"
+            ]
+        },
+        "节点CPU高": {
+            "description": "节点CPU使用率过高，影响所有运行在该节点的Pod",
+            "solutions": [
+                "扩容节点池，增加新节点",
+                "迁移部分Pod到其他节点",
+                "检查是否有异常进程占用CPU",
+                "优化节点上运行的Pod资源限制"
+            ]
+        },
+        "节点内存高": {
+            "description": "节点内存使用率过高，可能导致OOM",
+            "solutions": [
+                "扩容节点池或升级节点规格",
+                "迁移部分Pod到其他节点",
+                "清理不必要的进程或缓存",
+                "检查是否有内存泄漏的进程"
+            ]
+        },
+        "节点磁盘高": {
+            "description": "节点磁盘使用率过高，可能影响系统运行",
+            "solutions": [
+                "清理不必要的日志文件",
+                "清理无用的容器镜像",
+                "扩容节点磁盘",
+                "配置日志轮转策略"
+            ]
+        },
+        "关键事件": {
+            "description": "集群存在关键事件需要关注",
+            "solutions": [
+                "查看事件详情：kubectl describe <resource> <name>",
+                "根据事件类型采取相应措施",
+                "关注频繁出现的事件"
+            ]
+        },
+        "重要告警": {
+            "description": "存在未处理的告警",
+            "solutions": [
+                "在AOM控制台查看告警详情",
+                "根据告警内容进行排查",
+                "处理后确认告警状态"
+            ]
+        },
+        "Pod调度异常": {
+            "description": "Pod处于Pending状态，无法正常调度",
+            "solutions": [
+                "检查节点资源是否充足",
+                "检查Pod的资源requests/limits配置",
+                "检查节点标签和Pod的nodeSelector配置",
+                "检查是否存在资源配额限制"
+            ]
+        },
+        "ELB连接数高": {
+            "description": "ELB连接数过高，可能影响服务性能",
+            "solutions": [
+                "检查后端服务是否有性能瓶颈",
+                "考虑增加后端Pod副本数",
+                "检查连接是否正常释放",
+                "考虑升级ELB规格",
+                "检查是否有异常流量或攻击"
+            ]
+        },
+        "ELB带宽高": {
+            "description": "ELB入带宽过高，可能达到带宽瓶颈",
+            "solutions": [
+                "检查是否有大文件传输或异常流量",
+                "考虑升级ELB带宽规格",
+                "优化数据传输（启用压缩等）",
+                "检查后端服务响应数据大小",
+                "配置带宽限速策略"
+            ]
+        },
+        "EIP入带宽超限": {
+            "description": "EIP入带宽使用率过高，可能影响服务可用性",
+            "solutions": [
+                "升级EIP带宽规格",
+                "检查是否有异常入流量或攻击",
+                "配置流量清洗或防护策略",
+                "优化服务架构，使用CDN等分流"
+            ]
+        },
+        "EIP出带宽超限": {
+            "description": "EIP出带宽使用率过高，可能影响服务响应",
+            "solutions": [
+                "升级EIP带宽规格",
+                "检查是否有大文件下载或异常出流量",
+                "启用数据压缩减少传输量",
+                "使用对象存储(OBS)分担静态资源下载",
+                "配置带宽限速策略"
+            ]
+        }
+    }
+    
+    html = f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CCE集群巡检报告 - {inspection.get('inspection_time', '')}</title>
+    <style>
+        * {{
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: #f5f7fa;
+            color: #333;
+            line-height: 1.6;
+        }}
+        .container {{
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }}
+        .header {{
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }}
+        .header h1 {{
+            font-size: 28px;
+            margin-bottom: 10px;
+        }}
+        .header-info {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin-top: 15px;
+        }}
+        .header-info-item {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }}
+        .header-info-item span {{
+            opacity: 0.9;
+        }}
+        .status-badge {{
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 16px;
+        }}
+        .status-healthy {{ background-color: #d4edda; color: #155724; }}
+        .status-warning {{ background-color: #fff3cd; color: #856404; }}
+        .status-critical {{ background-color: #f8d7da; color: #721c24; }}
+        
+        .summary-cards {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }}
+        .summary-card {{
+            background: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+        }}
+        .summary-card h3 {{
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 10px;
+        }}
+        .summary-card .value {{
+            font-size: 32px;
+            font-weight: 700;
+        }}
+        .summary-card.critical .value {{ color: #dc3545; }}
+        .summary-card.warning .value {{ color: #ffc107; }}
+        .summary-card.healthy .value {{ color: #28a745; }}
+        
+        .check-section {{
+            background: white;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }}
+        .check-header {{
+            padding: 15px 20px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }}
+        .check-header h2 {{
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        .check-status {{
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 14px;
+            font-weight: 600;
+        }}
+        .check-status.pass {{ background: #d4edda; color: #155724; }}
+        .check-status.warn {{ background: #fff3cd; color: #856404; }}
+        .check-status.fail {{ background: #f8d7da; color: #721c24; }}
+        .check-status.skip {{ background: #e2e3e5; color: #383d41; }}
+        
+        .check-content {{
+            padding: 20px;
+        }}
+        .check-detail {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 15px;
+        }}
+        .detail-item {{
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }}
+        .detail-item label {{
+            font-size: 12px;
+            color: #666;
+            display: block;
+        }}
+        .detail-item span {{
+            font-size: 18px;
+            font-weight: 600;
+        }}
+        
+        .data-table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }}
+        .data-table th, .data-table td {{
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }}
+        .data-table th {{
+            background: #f8f9fa;
+            font-weight: 600;
+            font-size: 13px;
+            color: #666;
+        }}
+        .data-table td {{
+            font-size: 14px;
+        }}
+        .data-table tr:hover {{
+            background: #f8f9fa;
+        }}
+        
+        .issue-section {{
+            background: white;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }}
+        .issue-header {{
+            padding: 15px 20px;
+            background: #fff5f5;
+            border-bottom: 1px solid #fee;
+        }}
+        .issue-header h2 {{
+            color: #dc3545;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        .issue-item {{
+            padding: 20px;
+            border-bottom: 1px solid #eee;
+        }}
+        .issue-item:last-child {{
+            border-bottom: none;
+        }}
+        .issue-title {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }}
+        .issue-severity {{
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }}
+        .issue-severity.critical {{
+            background: #dc3545;
+            color: white;
+        }}
+        .issue-severity.warning {{
+            background: #ffc107;
+            color: #333;
+        }}
+        .issue-description {{
+            color: #666;
+            margin-bottom: 15px;
+            padding-left: 20px;
+        }}
+        .issue-solutions {{
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-left: 20px;
+        }}
+        .issue-solutions h4 {{
+            font-size: 14px;
+            color: #333;
+            margin-bottom: 10px;
+        }}
+        .issue-solutions ul {{
+            margin-left: 20px;
+        }}
+        .issue-solutions li {{
+            color: #666;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }}
+        .issue-solutions code {{
+            background: #e9ecef;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 13px;
+        }}
+        
+        .footer {{
+            text-align: center;
+            padding: 20px;
+            color: #666;
+            font-size: 14px;
+        }}
+        
+        .tag {{
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }}
+        .tag-danger {{ background: #f8d7da; color: #721c24; }}
+        .tag-warning {{ background: #fff3cd; color: #856404; }}
+        .tag-success {{ background: #d4edda; color: #155724; }}
+        .tag-info {{ background: #d1ecf1; color: #0c5460; }}
+        
+        .progress-bar {{
+            width: 100%;
+            height: 8px;
+            background: #e9ecef;
+            border-radius: 4px;
+            overflow: hidden;
+        }}
+        .progress-bar .fill {{
+            height: 100%;
+            border-radius: 4px;
+        }}
+        .progress-bar .fill.danger {{ background: #dc3545; }}
+        .progress-bar .fill.warning {{ background: #ffc107; }}
+        .progress-bar .fill.success {{ background: #28a745; }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>🔍 CCE 集群巡检报告</h1>
+            <div class="header-info">
+                <div class="header-info-item">
+                    <span>📍 集群ID:</span>
+                    <strong>{cluster_id}</strong>
+                </div>
+                <div class="header-info-item">
+                    <span>🌍 区域:</span>
+                    <strong>{region}</strong>
+                </div>
+                <div class="header-info-item">
+                    <span>🕐 巡检时间:</span>
+                    <strong>{inspection.get('inspection_time', '-')}</strong>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Status Badge -->
+        <div style="text-align: center; margin-bottom: 20px;">
+            <span class="status-badge status-{inspection['result']['status'].lower()}">
+                {status_icons.get(inspection['result']['status'], '❓')} 
+                巡检结果: {inspection['result']['status']}
+            </span>
+        </div>
+        
+        <!-- Summary Cards -->
+        <div class="summary-cards">
+            <div class="summary-card critical">
+                <h3>严重问题</h3>
+                <div class="value">{inspection['result']['critical_issues']}</div>
+            </div>
+            <div class="summary-card warning">
+                <h3>警告问题</h3>
+                <div class="value">{inspection['result']['warning_issues']}</div>
+            </div>
+            <div class="summary-card">
+                <h3>总问题数</h3>
+                <div class="value">{inspection['result']['total_issues']}</div>
+            </div>
+        </div>
+"""
+    
+    # 各巡检项详情
+    checks = inspection.get("checks", {})
+    
+    # 1. Pod状态巡检
+    pod_check = checks.get("pods", {})
+    if pod_check:
+        html += f"""
+        <div class="check-section">
+            <div class="check-header">
+                <h2>📦 Pod状态巡检</h2>
+                <span class="check-status {pod_check.get('status', 'PASS').lower()}">{pod_check.get('status', 'PASS')}</span>
+            </div>
+            <div class="check-content">
+                <div class="check-detail">
+                    <div class="detail-item">
+                        <label>总Pod数</label>
+                        <span>{pod_check.get('total', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>运行中</label>
+                        <span style="color: #28a745;">{pod_check.get('running', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>待调度</label>
+                        <span style="color: #ffc107;">{pod_check.get('pending', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>异常</label>
+                        <span style="color: #dc3545;">{pod_check.get('failed', 0)}</span>
+                    </div>
+                </div>
+"""
+        # 重启Pod表格
+        restart_pods = pod_check.get("restart_pods", [])
+        if restart_pods:
+            html += """
+                <h4 style="margin-top: 15px; margin-bottom: 10px; color: #dc3545;">重启Pod列表</h4>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Pod</th>
+                            <th>命名空间</th>
+                            <th>容器</th>
+                            <th>重启次数</th>
+                            <th>状态</th>
+                            <th>节点</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+            for p in restart_pods[:10]:
+                status = p.get('state_reason', 'Unknown')
+                status_class = 'tag-danger' if status == 'CrashLoopBackOff' else 'tag-warning'
+                html += f"""
+                        <tr>
+                            <td>{p.get('pod', '-')}</td>
+                            <td>{p.get('namespace', '-')}</td>
+                            <td>{p.get('container', '-')}</td>
+                            <td><span class="tag tag-danger">{p.get('restart_count', 0)}</span></td>
+                            <td><span class="tag {status_class}">{status}</span></td>
+                            <td>{p.get('node', '-')}</td>
+                        </tr>
+"""
+            html += """
+                    </tbody>
+                </table>
+"""
+        html += """
+            </div>
+        </div>
+"""
+    
+    # 2. Node状态巡检
+    node_check = checks.get("nodes", {})
+    if node_check:
+        html += f"""
+        <div class="check-section">
+            <div class="check-header">
+                <h2>🖥️ Node状态巡检</h2>
+                <span class="check-status {node_check.get('status', 'PASS').lower()}">{node_check.get('status', 'PASS')}</span>
+            </div>
+            <div class="check-content">
+                <div class="check-detail">
+                    <div class="detail-item">
+                        <label>总节点数</label>
+                        <span>{node_check.get('total', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>Ready</label>
+                        <span style="color: #28a745;">{node_check.get('ready', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>NotReady</label>
+                        <span style="color: #dc3545;">{node_check.get('not_ready', 0)}</span>
+                    </div>
+                </div>
+"""
+        # 异常节点
+        abnormal_nodes = node_check.get("abnormal_nodes", [])
+        if abnormal_nodes:
+            html += """
+                <h4 style="margin-top: 15px; margin-bottom: 10px; color: #dc3545;">异常节点列表</h4>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>节点名</th>
+                            <th>状态</th>
+                            <th>IP</th>
+                            <th>规格</th>
+                            <th>原因</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+            for n in abnormal_nodes:
+                html += f"""
+                        <tr>
+                            <td>{n.get('name', '-')}</td>
+                            <td><span class="tag tag-danger">{n.get('status', '-')}</span></td>
+                            <td>{n.get('ip', '-')}</td>
+                            <td>{n.get('flavor', '-')}</td>
+                            <td>{n.get('reason', '-')}</td>
+                        </tr>
+"""
+            html += """
+                    </tbody>
+                </table>
+"""
+        html += """
+            </div>
+        </div>
+"""
+    
+    # 3. Pod监控巡检
+    pod_mon = checks.get("pod_monitoring", {})
+    if pod_mon:
+        html += f"""
+        <div class="check-section">
+            <div class="check-header">
+                <h2>📊 集群Pod监控巡检</h2>
+                <span class="check-status {pod_mon.get('status', 'PASS').lower()}">{pod_mon.get('status', 'PASS')}</span>
+            </div>
+            <div class="check-content">
+                <div class="check-detail">
+                    <div class="detail-item">
+                        <label>CPU>80% Pod数</label>
+                        <span style="color: {'#dc3545' if pod_mon.get('high_cpu_count', 0) > 0 else '#28a745'};">{pod_mon.get('high_cpu_count', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>内存>80% Pod数</label>
+                        <span style="color: {'#dc3545' if pod_mon.get('high_memory_count', 0) > 0 else '#28a745'};">{pod_mon.get('high_memory_count', 0)}</span>
+                    </div>
+                </div>
+"""
+        # CPU高使用率Pod
+        high_cpu_pods = pod_mon.get("high_cpu_pods_top10", [])
+        if high_cpu_pods:
+            html += """
+                <h4 style="margin-top: 15px; margin-bottom: 10px; color: #dc3545;">CPU使用率 Top 10 (>80%)</h4>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Pod</th>
+                            <th>命名空间</th>
+                            <th>CPU使用率</th>
+                            <th>节点</th>
+                            <th>状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+            for p in high_cpu_pods:
+                cpu_val = p.get('cpu_usage_percent', 0)
+                status_class = 'tag-danger' if cpu_val > 90 else 'tag-warning'
+                html += f"""
+                        <tr>
+                            <td>{p.get('pod', '-')}</td>
+                            <td>{p.get('namespace', '-')}</td>
+                            <td>
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <div class="progress-bar" style="width: 100px;">
+                                        <div class="fill danger" style="width: {min(cpu_val, 100)}%;"></div>
+                                    </div>
+                                    <span>{cpu_val}%</span>
+                                </div>
+                            </td>
+                            <td>{p.get('node', '-')}</td>
+                            <td><span class="tag {status_class}">{p.get('status', 'warning')}</span></td>
+                        </tr>
+"""
+            html += """
+                    </tbody>
+                </table>
+"""
+        html += """
+            </div>
+        </div>
+"""
+    
+    # 4. 节点资源监控巡检
+    node_mon = checks.get("node_monitoring", {})
+    if node_mon:
+        html += f"""
+        <div class="check-section">
+            <div class="check-header">
+                <h2>💻 节点资源监控巡检</h2>
+                <span class="check-status {node_mon.get('status', 'PASS').lower()}">{node_mon.get('status', 'PASS')}</span>
+            </div>
+            <div class="check-content">
+                <div class="check-detail">
+                    <div class="detail-item">
+                        <label>CPU>80% 节点数</label>
+                        <span style="color: {'#dc3545' if node_mon.get('high_cpu_count', 0) > 0 else '#28a745'};">{node_mon.get('high_cpu_count', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>内存>80% 节点数</label>
+                        <span style="color: {'#dc3545' if node_mon.get('high_memory_count', 0) > 0 else '#28a745'};">{node_mon.get('high_memory_count', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>磁盘>80% 节点数</label>
+                        <span style="color: {'#dc3545' if node_mon.get('high_disk_count', 0) > 0 else '#28a745'};">{node_mon.get('high_disk_count', 0)}</span>
+                    </div>
+                </div>
+"""
+        # CPU高使用率节点
+        high_cpu_nodes = node_mon.get("high_cpu_nodes_top10", [])
+        if high_cpu_nodes:
+            html += """
+                <h4 style="margin-top: 15px; margin-bottom: 10px; color: #dc3545;">CPU使用率 Top 10 (>80%)</h4>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>节点IP</th>
+                            <th>CPU使用率</th>
+                            <th>状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+            for n in high_cpu_nodes:
+                cpu_val = n.get('cpu_usage_percent', 0)
+                status_class = 'tag-danger' if cpu_val > 90 else 'tag-warning'
+                html += f"""
+                        <tr>
+                            <td>{n.get('node_ip', '-')}</td>
+                            <td>
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <div class="progress-bar" style="width: 100px;">
+                                        <div class="fill danger" style="width: {min(cpu_val, 100)}%;"></div>
+                                    </div>
+                                    <span>{cpu_val}%</span>
+                                </div>
+                            </td>
+                            <td><span class="tag {status_class}">{n.get('status', 'warning')}</span></td>
+                        </tr>
+"""
+            html += """
+                    </tbody>
+                </table>
+"""
+        html += """
+            </div>
+        </div>
+"""
+    
+    # 5. Event巡检
+    event_check = checks.get("events", {})
+    if event_check:
+        html += f"""
+        <div class="check-section">
+            <div class="check-header">
+                <h2>📝 Event巡检</h2>
+                <span class="check-status {event_check.get('status', 'PASS').lower()}">{event_check.get('status', 'PASS')}</span>
+            </div>
+            <div class="check-content">
+                <div class="check-detail">
+                    <div class="detail-item">
+                        <label>总事件数</label>
+                        <span>{event_check.get('total', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>Normal</label>
+                        <span style="color: #28a745;">{event_check.get('normal', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>Warning</label>
+                        <span style="color: #ffc107;">{event_check.get('warning', 0)}</span>
+                    </div>
+                </div>
+"""
+        # 关键事件
+        critical_events = event_check.get("critical_events", [])
+        if critical_events:
+            html += f"""
+                <h4 style="margin-top: 15px; margin-bottom: 10px; color: #dc3545;">关键事件 ({len(critical_events)}个)</h4>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>原因</th>
+                            <th>对象</th>
+                            <th>命名空间</th>
+                            <th>次数</th>
+                            <th>消息</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+            for e in critical_events[:10]:
+                html += f"""
+                        <tr>
+                            <td><span class="tag tag-warning">{e.get('reason', '-')}</span></td>
+                            <td>{e.get('involved_object', '-')}</td>
+                            <td>{e.get('namespace', '-')}</td>
+                            <td>{e.get('count', 1)}</td>
+                            <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis;">{e.get('message', '-')[:100]}...</td>
+                        </tr>
+"""
+            html += """
+                    </tbody>
+                </table>
+"""
+        html += """
+            </div>
+        </div>
+"""
+    
+    # 6. AOM告警巡检
+    alarm_check = checks.get("alarms", {})
+    if alarm_check:
+        sb = alarm_check.get("severity_breakdown", {})
+        html += f"""
+        <div class="check-section">
+            <div class="check-header">
+                <h2>🔔 AOM告警巡检</h2>
+                <span class="check-status {alarm_check.get('status', 'PASS').lower()}">{alarm_check.get('status', 'PASS')}</span>
+            </div>
+            <div class="check-content">
+                <div class="check-detail">
+                    <div class="detail-item">
+                        <label>总告警数</label>
+                        <span>{alarm_check.get('total', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>Critical</label>
+                        <span style="color: #dc3545;">{sb.get('Critical', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>Major</label>
+                        <span style="color: #ffc107;">{sb.get('Major', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>Minor</label>
+                        <span style="color: #17a2b8;">{sb.get('Minor', 0)}</span>
+                    </div>
+                </div>
+"""
+        # 集群告警
+        cluster_alarms = alarm_check.get("cluster_alarms", [])
+        if cluster_alarms:
+            html += f"""
+                <h4 style="margin-top: 15px; margin-bottom: 10px; color: #dc3545;">集群告警 ({len(cluster_alarms)}个)</h4>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>严重级别</th>
+                            <th>告警名称</th>
+                            <th>资源</th>
+                            <th>消息</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+            for a in cluster_alarms[:10]:
+                severity = a.get('severity', 'Unknown')
+                severity_class = 'tag-danger' if severity == 'Critical' else 'tag-warning' if severity == 'Major' else 'tag-info'
+                html += f"""
+                        <tr>
+                            <td><span class="tag {severity_class}">{severity}</span></td>
+                            <td>{a.get('name', '-')}</td>
+                            <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis;">{a.get('resource_id', '-')[:50]}</td>
+                            <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis;">{a.get('message', '-')[:80]}...</td>
+                        </tr>
+"""
+            html += """
+                    </tbody>
+                </table>
+"""
+        html += """
+            </div>
+        </div>
+"""
+    
+    # 7. ELB监控巡检
+    elb_check = checks.get("elb_monitoring", {})
+    if elb_check:
+        html += f"""
+        <div class="check-section">
+            <div class="check-header">
+                <h2>⚖️ ELB负载均衡监控巡检</h2>
+                <span class="check-status {elb_check.get('status', 'PASS').lower()}">{elb_check.get('status', 'PASS')}</span>
+            </div>
+            <div class="check-content">
+                <div class="check-detail">
+                    <div class="detail-item">
+                        <label>LoadBalancer服务数</label>
+                        <span>{elb_check.get('total_loadbalancers', 0)}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>高连接数ELB</label>
+                        <span style="color: {'#dc3545' if elb_check.get('high_connection_elbs') else '#28a745'};">{len(elb_check.get('high_connection_elbs', []))}</span>
+                    </div>
+                    <div class="detail-item">
+                        <label>高带宽ELB</label>
+                        <span style="color: {'#dc3545' if elb_check.get('high_bandwidth_elbs') else '#28a745'};">{len(elb_check.get('high_bandwidth_elbs', []))}</span>
+                    </div>
+                </div>
+"""
+        # LoadBalancer服务列表
+        lb_services = elb_check.get("loadbalancer_services", [])
+        if lb_services:
+            html += f"""
+                <h4 style="margin-top: 15px; margin-bottom: 10px;">LoadBalancer服务列表</h4>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Service</th>
+                            <th>命名空间</th>
+                            <th>ELB ID</th>
+                            <th>ELB IP</th>
+                            <th>端口</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+            for lb in lb_services:
+                ports_str = ", ".join([f"{p.get('port', '')}/{p.get('protocol', '')}" for p in lb.get('ports', [])])
+                html += f"""
+                        <tr>
+                            <td>{lb.get('service_name', '-')}</td>
+                            <td>{lb.get('namespace', '-')}</td>
+                            <td><code style="font-size: 12px;">{lb.get('elb_id', '-')}</code></td>
+                            <td>{lb.get('load_balancer_ip', '-')}</td>
+                            <td>{ports_str}</td>
+                        </tr>
+"""
+            html += """
+                    </tbody>
+                </table>
+"""
+        
+        # ELB监控指标
+        elb_metrics = elb_check.get("elb_metrics", [])
+        if elb_metrics:
+            html += f"""
+                <h4 style="margin-top: 15px; margin-bottom: 10px;">ELB监控指标</h4>
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Service</th>
+                            <th>命名空间</th>
+                            <th>连接数</th>
+                            <th>入带宽</th>
+                            <th>QPS</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+"""
+            for m in elb_metrics:
+                conn = m.get('connection_num', '-')
+                bandwidth = m.get('in_bandwidth_bps')
+                bandwidth_str = f"{round(bandwidth / 1024 / 1024, 2)} Mbps" if bandwidth else '-'
+                qps = m.get('qps', '-')
+                
+                # 判断是否高负载
+                conn_color = '#dc3545' if conn and conn > 10000 else '#333'
+                bandwidth_color = '#dc3545' if bandwidth and bandwidth > 100 * 1024 * 1024 else '#333'
+                
+                html += f"""
+                        <tr>
+                            <td>{m.get('service_name', '-')}</td>
+                            <td>{m.get('namespace', '-')}</td>
+                            <td style="color: {conn_color};">{conn if conn else '-'}</td>
+                            <td style="color: {bandwidth_color};">{bandwidth_str}</td>
+                            <td>{qps if qps else '-'}</td>
+                        </tr>
+"""
+            html += """
+                    </tbody>
+                </table>
+"""
+        
+        # 高负载ELB告警
+        high_conn = elb_check.get("high_connection_elbs", [])
+        high_bw = elb_check.get("high_bandwidth_elbs", [])
+        
+        if high_conn or high_bw:
+            html += f"""
+                <h4 style="margin-top: 15px; margin-bottom: 10px; color: #dc3545;">高负载ELB告警</h4>
+                <div style="background: #fff5f5; padding: 15px; border-radius: 8px; border-left: 4px solid #dc3545;">
+"""
+            for lb in high_conn:
+                html += f"""
+                    <p style="margin-bottom: 5px;"><span class="tag tag-warning">高连接数</span> 
+                    <strong>{lb.get('namespace')}/{lb.get('service')}</strong>: 连接数 <code>{lb.get('connection_num')}</code></p>
+"""
+            for lb in high_bw:
+                html += f"""
+                    <p style="margin-bottom: 5px;"><span class="tag tag-warning">高带宽</span> 
+                    <strong>{lb.get('namespace')}/{lb.get('service')}</strong>: 入带宽 <code>{lb.get('in_bandwidth_mbps')} Mbps</code></p>
+"""
+            html += """
+                </div>
+"""
+        html += """
+            </div>
+        </div>
+"""
+    
+    # 问题汇总与建议
+    issues = inspection.get("issues", [])
+    if issues:
+        critical_issues = [i for i in issues if i.get("severity") == "CRITICAL"]
+        warning_issues = [i for i in issues if i.get("severity") == "WARNING"]
+        
+        html += f"""
+        <div class="issue-section">
+            <div class="issue-header">
+                <h2>🔧 问题汇总与解决建议</h2>
+            </div>
+            <div style="padding: 15px 20px; background: #fff; border-bottom: 1px solid #eee;">
+                <p style="color: #666;">共发现 <strong style="color: #dc3545;">{len(critical_issues)}</strong> 个严重问题，
+                <strong style="color: #ffc107;">{len(warning_issues)}</strong> 个警告问题，以下为详细分析和建议：</p>
+            </div>
+"""
+        
+        # 按问题类型分组
+        issues_by_category = {}
+        for issue in issues:
+            category = issue.get("category", "其他")
+            if category not in issues_by_category:
+                issues_by_category[category] = []
+            issues_by_category[category].append(issue)
+        
+        for category, category_issues in issues_by_category.items():
+            solution_info = issue_solutions.get(category, {
+                "description": "需要进一步分析该问题",
+                "solutions": ["查看详细日志进行分析", "根据具体情况采取相应措施"]
+            })
+            
+            html += f"""
+            <div class="issue-item">
+                <div class="issue-title">
+                    <span class="issue-severity {category_issues[0].get('severity', 'WARNING').lower()}">{category_issues[0].get('severity', 'WARNING')}</span>
+                    <strong>{category}</strong>
+                    <span style="color: #666; font-size: 14px;">({len(category_issues)}个)</span>
+                </div>
+                <div class="issue-description">
+                    {solution_info.get('description', '')}
+                </div>
+                <div class="issue-solutions">
+                    <h4>💡 解决建议：</h4>
+                    <ul>
+"""
+            for solution in solution_info.get("solutions", []):
+                html += f"                        <li>{solution}</li>\n"
+            
+            html += """
+                    </ul>
+                </div>
+            </div>
+"""
+        
+        html += """
+        </div>
+"""
+    
+    # Footer
+    html += f"""
+        <div class="footer">
+            <p>📅 报告生成时间: {inspection.get('inspection_time', '-')}</p>
+            <p>CCE集群巡检工具 | 由AI助手自动生成</p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+    
+    return html
+
+
+def get_cce_pod_metrics(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None, label_selector: str = None, top_n: int = 10, hours: int = 1, cpu_query: str = None, memory_query: str = None) -> Dict[str, Any]:
+    """获取 CCE 集群 Pod 监控数据
+
+    自动获取 AOM 实例并执行 Pod CPU/内存监控查询，返回 Top N 数据。
+
+    Args:
+        region: 华为云区域 (如 cn-north-4)
+        cluster_id: CCE 集群 ID
+        ak: Access Key ID (可选)
+        sk: Secret Access Key (可选)
+        project_id: Project ID (可选)
+        namespace: 命名空间过滤 (可选，默认所有命名空间)
+        label_selector: Pod 标签选择器 (可选，格式: "app=nginx,version=v1")
+        top_n: 返回 Top N 数据 (默认 10)
+        hours: 查询时间范围（小时）(默认 1)
+        cpu_query: 自定义 CPU PromQL (可选)
+        memory_query: 自定义内存 PromQL (可选)
+
+    Returns:
+        Dict with success status and pod metrics data
+    """
+    import time as time_module
+
+    access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Credentials not provided"}
+
+    if not cluster_id:
+        return {"success": False, "error": "cluster_id is required"}
+
+    # ========== 1. 获取集群名称 ==========
+    cluster_name = cluster_id
+    try:
+        clusters_result = list_cce_clusters(region, access_key, secret_key, proj_id)
+        if clusters_result.get("success"):
+            for c in clusters_result.get("clusters", []):
+                if c.get("id") == cluster_id:
+                    cluster_name = c.get("name", cluster_id)
+                    break
+    except Exception:
+        pass
+
+    # ========== 2. 如果有 label_selector，先获取符合条件的 Pod 列表 ==========
+    pod_filter_list = None  # 用于过滤的 Pod 名称列表
+    matched_pods_info = []  # 匹配的 Pod 详细信息
+
+    if label_selector:
+        # 解析 label_selector (格式: "app=nginx,version=v1")
+        label_filters = {}
+        for part in label_selector.split(","):
+            part = part.strip()
+            if "=" in part:
+                key, value = part.split("=", 1)
+                label_filters[key.strip()] = value.strip()
+
+        if label_filters:
+            # 获取 Pod 列表
+            pods_result = get_kubernetes_pods(region, cluster_id, access_key, secret_key, proj_id, namespace)
+            if pods_result.get("success"):
+                matched_pods = []
+                for pod in pods_result.get("pods", []):
+                    pod_labels = pod.get("labels", {})
+                    pod_name = pod.get("name", "")
+                    pod_ns = pod.get("namespace", "")
+
+                    # 检查是否匹配所有 label 条件
+                    match = True
+                    for key, value in label_filters.items():
+                        if pod_labels.get(key) != value:
+                            match = False
+                            break
+
+                    if match:
+                        matched_pods.append(pod_name)
+                        matched_pods_info.append({
+                            "name": pod_name,
+                            "namespace": pod_ns,
+                            "labels": pod_labels,
+                            "status": pod.get("status"),
+                            "node": pod.get("node")
+                        })
+
+                if matched_pods:
+                    pod_filter_list = matched_pods
+                else:
+                    # 没有匹配的 Pod，直接返回空结果
+                    return {
+                        "success": True,
+                        "region": region,
+                        "cluster_id": cluster_id,
+                        "cluster_name": cluster_name,
+                        "aom_instance_id": None,
+                        "inspection_time": time_module.strftime('%Y-%m-%d %H:%M:%S', time_module.localtime()),
+                        "query_params": {
+                            "top_n": top_n,
+                            "hours": hours,
+                            "namespace": namespace,
+                            "label_selector": label_selector
+                        },
+                        "label_filter": {
+                            "selector": label_selector,
+                            "parsed": label_filters,
+                            "matched_count": 0,
+                            "matched_pods": []
+                        },
+                        "promql": {"cpu": None, "memory": None},
+                        "metrics": {
+                            "cpu_top_n": [],
+                            "memory_top_n": [],
+                            "all_pods": []
+                        },
+                        "summary": {
+                            "total_pods": 0,
+                            "critical_cpu": 0,
+                            "critical_memory": 0,
+                            "warning_cpu": 0,
+                            "warning_memory": 0
+                        },
+                        "message": f"没有找到匹配 label_selector '{label_selector}' 的 Pod"
+                    }
+
+    # ========== 3. 获取 AOM 实例 ==========
+    aom_instance_id = None
+    aom_instances = list_aom_instances(region, access_key, secret_key, proj_id)
+    cce_instances = []
+    if aom_instances.get("success"):
+        for instance in aom_instances.get("instances", []):
+            if instance.get("type") == "CCE":
+                cce_instances.append(instance)
+
+    # 测试每个 CCE 实例，找到有数据的
+    for instance in cce_instances:
+        test_instance_id = instance.get("id")
+        test_result = get_aom_prom_metrics_http(region, test_instance_id, "up", hours=0.1, ak=access_key, sk=secret_key, project_id=proj_id)
+        if test_result.get("success") and test_result.get("result", {}).get("data", {}).get("result"):
+            aom_instance_id = test_instance_id
+            break
+
+    if not aom_instance_id:
+        return {
+            "success": False,
+            "error": "未找到可用的 AOM 实例",
+            "cluster_id": cluster_id,
+            "cluster_name": cluster_name
+        }
+
+    # ========== 4. 构建 PromQL 查询 ==========
+    # 构建 Pod 过滤条件
+    pod_filter_clause = ""
+    if pod_filter_list:
+        # 使用正则匹配多个 Pod 名称
+        pod_regex = "|".join(pod_filter_list[:100])  # 限制最多 100 个 Pod
+        pod_filter_clause = f',pod=~"{pod_regex}"'
+
+    # 默认 CPU 使用率 PromQL (相对 Limit %)
+    if cpu_query is None:
+        if namespace:
+            cpu_query = f'topk({top_n}, sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{{image!="",namespace="{namespace}"{pod_filter_clause}}}[5m])) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="cpu",namespace="{namespace}"{pod_filter_clause}}}) * 100)'
+        else:
+            cpu_query = f'topk({top_n}, sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{{image!=""{pod_filter_clause}}}[5m])) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="cpu"{pod_filter_clause}}}) * 100)'
+
+    # 默认内存使用率 PromQL (相对 Limit %)
+    if memory_query is None:
+        if namespace:
+            memory_query = f'topk({top_n}, sum by (pod, namespace) (container_memory_working_set_bytes{{image!="",namespace="{namespace}"{pod_filter_clause}}}) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="memory",namespace="{namespace}"{pod_filter_clause}}}) * 100)'
+        else:
+            memory_query = f'topk({top_n}, sum by (pod, namespace) (container_memory_working_set_bytes{{image!=""{pod_filter_clause}}}) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="memory"{pod_filter_clause}}}) * 100)'
+
+    # ========== 5. 执行查询 ==========
+    cpu_result = get_aom_prom_metrics_http(region, aom_instance_id, cpu_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+    memory_result = get_aom_prom_metrics_http(region, aom_instance_id, memory_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+
+    # ========== 6. 解析结果 ==========
+    cpu_metrics = []
+    if cpu_result.get("success") and cpu_result.get("result", {}).get("data", {}).get("result"):
+        for item in cpu_result["result"]["data"]["result"]:
+            metric = item.get("metric", {})
+            values = item.get("values", [])
+            if values:
+                try:
+                    latest_value = float(values[-1][1])
+                    cpu_metrics.append({
+                        "pod": metric.get("pod", "unknown"),
+                        "namespace": metric.get("namespace", "unknown"),
+                        "cpu_usage_percent": round(latest_value, 2),
+                        "status": "critical" if latest_value > 80 else "warning" if latest_value > 50 else "normal"
+                    })
+                except (ValueError, IndexError):
+                    pass
+
+    memory_metrics = []
+    if memory_result.get("success") and memory_result.get("result", {}).get("data", {}).get("result"):
+        for item in memory_result["result"]["data"]["result"]:
+            metric = item.get("metric", {})
+            values = item.get("values", [])
+            if values:
+                try:
+                    latest_value = float(values[-1][1])
+                    memory_metrics.append({
+                        "pod": metric.get("pod", "unknown"),
+                        "namespace": metric.get("namespace", "unknown"),
+                        "memory_usage_percent": round(latest_value, 2),
+                        "status": "critical" if latest_value > 80 else "warning" if latest_value > 50 else "normal"
+                    })
+                except (ValueError, IndexError):
+                    pass
+
+    # 按 CPU 使用率排序
+    cpu_metrics.sort(key=lambda x: x["cpu_usage_percent"], reverse=True)
+    memory_metrics.sort(key=lambda x: x["memory_usage_percent"], reverse=True)
+
+    # 合并 CPU 和内存数据
+    pod_metrics_map = {}
+    for m in cpu_metrics[:top_n]:
+        key = f"{m['namespace']}/{m['pod']}"
+        pod_metrics_map[key] = m
+    for m in memory_metrics[:top_n]:
+        key = f"{m['namespace']}/{m['pod']}"
+        if key in pod_metrics_map:
+            pod_metrics_map[key]["memory_usage_percent"] = m["memory_usage_percent"]
+        else:
+            pod_metrics_map[key] = m
+
+    # ========== 7. 返回结果 ==========
+    result = {
+        "success": True,
+        "region": region,
+        "cluster_id": cluster_id,
+        "cluster_name": cluster_name,
+        "aom_instance_id": aom_instance_id,
+        "inspection_time": time_module.strftime('%Y-%m-%d %H:%M:%S', time_module.localtime()),
+        "query_params": {
+            "top_n": top_n,
+            "hours": hours,
+            "namespace": namespace
+        },
+        "promql": {
+            "cpu": cpu_query,
+            "memory": memory_query
+        },
+        "metrics": {
+            "cpu_top_n": cpu_metrics[:top_n],
+            "memory_top_n": memory_metrics[:top_n],
+            "all_pods": list(pod_metrics_map.values())
+        },
+        "summary": {
+            "total_pods": len(pod_metrics_map),
+            "critical_cpu": len([m for m in cpu_metrics if m["status"] == "critical"]),
+            "critical_memory": len([m for m in memory_metrics if m["status"] == "critical"]),
+            "warning_cpu": len([m for m in cpu_metrics if m["status"] == "warning"]),
+            "warning_memory": len([m for m in memory_metrics if m["status"] == "warning"])
+        }
+    }
+
+    # 如果有 label 过滤，添加过滤信息
+    if label_selector:
+        result["query_params"]["label_selector"] = label_selector
+        result["label_filter"] = {
+            "selector": label_selector,
+            "matched_count": len(matched_pods_info),
+            "matched_pods": matched_pods_info[:50]  # 最多返回 50 个 Pod 信息
+        }
+
+    return result
+
+
+def get_cce_node_metrics(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, top_n: int = 10, hours: int = 1, cpu_query: str = None, memory_query: str = None, disk_query: str = None) -> Dict[str, Any]:
+    """获取 CCE 集群节点监控数据
+
+    自动获取 AOM 实例并执行节点 CPU/内存/磁盘监控查询，返回 Top N 数据。
+
+    Args:
+        region: 华为云区域 (如 cn-north-4)
+        cluster_id: CCE 集群 ID
+        ak: Access Key ID (可选)
+        sk: Secret Access Key (可选)
+        project_id: Project ID (可选)
+        top_n: 返回 Top N 数据 (默认 10)
+        hours: 查询时间范围（小时）(默认 1)
+        cpu_query: 自定义 CPU PromQL (可选)
+        memory_query: 自定义内存 PromQL (可选)
+        disk_query: 自定义磁盘 PromQL (可选)
+
+    Returns:
+        Dict with success status and node metrics data
+    """
+    import time as time_module
+
+    access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Credentials not provided"}
+
+    if not cluster_id:
+        return {"success": False, "error": "cluster_id is required"}
+
+    # ========== 1. 获取集群名称 ==========
+    cluster_name = cluster_id
+    try:
+        clusters_result = list_cce_clusters(region, access_key, secret_key, proj_id)
+        if clusters_result.get("success"):
+            for c in clusters_result.get("clusters", []):
+                if c.get("id") == cluster_id:
+                    cluster_name = c.get("name", cluster_id)
+                    break
+    except Exception:
+        pass
+
+    # ========== 2. 获取节点信息映射 ==========
+    node_info_map = {}  # IP -> 节点信息
+
+    # 从 Kubernetes API 获取节点信息（节点名称即 IP）
+    k8s_nodes_result = get_kubernetes_nodes(region, cluster_id, access_key, secret_key, proj_id)
+    if k8s_nodes_result.get("success"):
+        for node in k8s_nodes_result.get("nodes", []):
+            node_name = node.get("name", "")  # Kubernetes 节点名即 IP
+            if node_name:
+                node_info_map[node_name] = {
+                    "name": node_name,
+                    "ip": node_name,
+                    "status": node.get("status", "Unknown"),
+                    "kubelet_version": node.get("kubelet_version", ""),
+                    "os": node.get("os", ""),
+                    "container_runtime": node.get("container_runtime", "")
+                }
+
+    # 从 CCE API 获取节点规格等信息（按名称匹配）
+    cce_nodes_result = list_cce_cluster_nodes(region, cluster_id, access_key, secret_key, proj_id)
+    if cce_nodes_result.get("success"):
+        for cce_node in cce_nodes_result.get("nodes", []):
+            cce_node_name = cce_node.get("name", "")
+            # 尝试通过名称匹配
+            for ip, node_info in node_info_map.items():
+                if ip in cce_node_name or cce_node_name.endswith(ip.replace(".", "")):
+                    node_info["cce_name"] = cce_node_name
+                    node_info["id"] = cce_node.get("id", "")
+                    node_info["flavor"] = cce_node.get("flavor", "")
+                    node_info["cce_status"] = cce_node.get("status", "")
+                    break
+
+    # ========== 3. 获取 AOM 实例 ==========
+    aom_instance_id = None
+    aom_instances = list_aom_instances(region, access_key, secret_key, proj_id)
+    cce_instances = []
+    if aom_instances.get("success"):
+        for instance in aom_instances.get("instances", []):
+            if instance.get("type") == "CCE":
+                cce_instances.append(instance)
+
+    # 测试每个 CCE 实例，找到有数据的
+    for instance in cce_instances:
+        test_instance_id = instance.get("id")
+        test_result = get_aom_prom_metrics_http(region, test_instance_id, "up", hours=0.1, ak=access_key, sk=secret_key, project_id=proj_id)
+        if test_result.get("success") and test_result.get("result", {}).get("data", {}).get("result"):
+            aom_instance_id = test_instance_id
+            break
+
+    if not aom_instance_id:
+        return {
+            "success": False,
+            "error": "未找到可用的 AOM 实例",
+            "cluster_id": cluster_id,
+            "cluster_name": cluster_name
+        }
+
+    # ========== 4. 构建 PromQL 查询 ==========
+    # 默认 CPU 使用率 PromQL
+    if cpu_query is None:
+        cpu_query = f"topk({top_n}, 100 - (avg by (instance) (irate(node_cpu_seconds_total{{mode='idle',cluster_name='{cluster_name}'}}[5m])) * 100))"
+
+    # 默认内存使用率 PromQL
+    if memory_query is None:
+        memory_query = f"topk({top_n}, avg by (instance) ((1 - node_memory_MemAvailable_bytes{{cluster_name='{cluster_name}'}} / node_memory_MemTotal_bytes{{cluster_name='{cluster_name}'}})) * 100)"
+
+    # 默认磁盘使用率 PromQL
+    if disk_query is None:
+        disk_query = f"topk({top_n}, avg by (instance) ((1 - node_filesystem_avail_bytes{{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',cluster_name='{cluster_name}'}} / node_filesystem_size_bytes{{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',cluster_name='{cluster_name}'}})) * 100)"
+
+    # ========== 5. 执行查询 ==========
+    cpu_result = get_aom_prom_metrics_http(region, aom_instance_id, cpu_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+    memory_result = get_aom_prom_metrics_http(region, aom_instance_id, memory_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+    disk_result = get_aom_prom_metrics_http(region, aom_instance_id, disk_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+
+    # ========== 6. 解析结果 ==========
+    def parse_node_result(result, metric_name):
+        """解析节点监控结果"""
+        metrics = []
+        if result.get("success") and result.get("result", {}).get("data", {}).get("result"):
+            for item in result["result"]["data"]["result"]:
+                metric = item.get("metric", {})
+                values = item.get("values", [])
+                if values:
+                    try:
+                        latest_value = float(values[-1][1])
+                        instance = metric.get("instance", "unknown")
+                        # 提取 IP 地址
+                        instance_ip = instance.split(":")[0] if ":" in instance else instance
+
+                        # 获取节点信息
+                        node_info = node_info_map.get(instance_ip, {})
+                        # 优先使用节点名称，否则使用 IP
+                        node_name = node_info.get("name", instance_ip)
+
+                        metrics.append({
+                            "instance": instance,
+                            "node_ip": instance_ip,
+                            "node_name": node_name,
+                            "node_id": node_info.get("id", ""),
+                            "flavor": node_info.get("flavor", ""),
+                            metric_name: round(latest_value, 2),
+                            "status": "critical" if latest_value > 80 else "warning" if latest_value > 50 else "normal"
+                        })
+                    except (ValueError, IndexError):
+                        pass
+        return metrics
+
+    cpu_metrics = parse_node_result(cpu_result, "cpu_usage_percent")
+    memory_metrics = parse_node_result(memory_result, "memory_usage_percent")
+    disk_metrics = parse_node_result(disk_result, "disk_usage_percent")
+
+    # 按使用率排序
+    cpu_metrics.sort(key=lambda x: x["cpu_usage_percent"], reverse=True)
+    memory_metrics.sort(key=lambda x: x["memory_usage_percent"], reverse=True)
+    disk_metrics.sort(key=lambda x: x["disk_usage_percent"], reverse=True)
+
+    # 合并所有节点的监控数据
+    all_nodes_map = {}
+    for m in cpu_metrics:
+        key = m["node_ip"]
+        all_nodes_map[key] = m
+    for m in memory_metrics:
+        key = m["node_ip"]
+        if key in all_nodes_map:
+            all_nodes_map[key]["memory_usage_percent"] = m["memory_usage_percent"]
+            all_nodes_map[key]["status"] = "critical" if m["memory_usage_percent"] > 80 else "warning" if m["memory_usage_percent"] > 50 else all_nodes_map[key]["status"]
+        else:
+            all_nodes_map[key] = m
+    for m in disk_metrics:
+        key = m["node_ip"]
+        if key in all_nodes_map:
+            all_nodes_map[key]["disk_usage_percent"] = m["disk_usage_percent"]
+            if m["disk_usage_percent"] > 80:
+                all_nodes_map[key]["status"] = "critical"
+            elif m["disk_usage_percent"] > 50 and all_nodes_map[key]["status"] == "normal":
+                all_nodes_map[key]["status"] = "warning"
+        else:
+            all_nodes_map[key] = m
+
+    # ========== 7. 返回结果 ==========
+    return {
+        "success": True,
+        "region": region,
+        "cluster_id": cluster_id,
+        "cluster_name": cluster_name,
+        "aom_instance_id": aom_instance_id,
+        "inspection_time": time_module.strftime('%Y-%m-%d %H:%M:%S', time_module.localtime()),
+        "query_params": {
+            "top_n": top_n,
+            "hours": hours
+        },
+        "promql": {
+            "cpu": cpu_query,
+            "memory": memory_query,
+            "disk": disk_query
+        },
+        "metrics": {
+            "cpu_top_n": cpu_metrics[:top_n],
+            "memory_top_n": memory_metrics[:top_n],
+            "disk_top_n": disk_metrics[:top_n],
+            "all_nodes": list(all_nodes_map.values())
+        },
+        "summary": {
+            "total_nodes": len(all_nodes_map),
+            "critical_cpu": len([m for m in cpu_metrics if m["status"] == "critical"]),
+            "critical_memory": len([m for m in memory_metrics if m["status"] == "critical"]),
+            "critical_disk": len([m for m in disk_metrics if m["status"] == "critical"]),
+            "warning_cpu": len([m for m in cpu_metrics if m["status"] == "warning"]),
+            "warning_memory": len([m for m in memory_metrics if m["status"] == "warning"]),
+            "warning_disk": len([m for m in disk_metrics if m["status"] == "warning"])
+        }
+    }
+
+
+def list_aom_alerts(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, alert_status: str = None, severity: str = None, limit: int = 100) -> Dict[str, Any]:
+    """List AOM alerts (alarm records)
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+        alert_status: Filter by alert status - 'firing' or 'resolved' (optional)
+        severity: Filter by severity - 'critical', 'warning', 'info' (optional)
+        limit: Maximum number of alerts to return (default: 100)
+    
+    Returns:
+        Dict with success status and list of alerts
+    """
+    if not SDK_AVAILABLE:
+        return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+    
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Credentials not provided"}
+    
+    try:
+        from huaweicloudsdkaom.v2 import (
+            ListAlarmRuleRequest, 
+            ListEvent2alarmRuleRequest,
+            ListActionRuleRequest
+        )
+        
+        client = create_aom_client(region, access_key, secret_key, proj_id)
+        
+        # 获取阈值告警规则
+        alarm_rules = []
+        try:
+            alarm_req = ListAlarmRuleRequest()
+            alarm_req.limit = limit
+            alarm_resp = client.list_alarm_rule(alarm_req)
+            if hasattr(alarm_resp, 'alarm_rules') and alarm_resp.alarm_rules:
+                for rule in alarm_resp.alarm_rules:
+                    rule_info = {
+                        "rule_name": getattr(rule, 'alarm_rule_name', None),
+                        "rule_id": getattr(rule, 'alarm_rule_id', None),
+                        "rule_description": getattr(rule, 'alarm_rule_description', None),
+                        "rule_status": getattr(rule, 'alarm_rule_status', None),
+                        "alarm_level": getattr(rule, 'alarm_level', None),
+                        "metric_name": getattr(rule, 'metric_name', None),
+                        "namespace": getattr(rule, 'namespace', None),
+                        "resource_id": getattr(rule, 'resource_id', None),
+                    }
+                    alarm_rules.append(rule_info)
+        except Exception as e:
+            pass
+        
+        # 获取事件告警规则
+        event_rules = []
+        try:
+            event_req = ListEvent2alarmRuleRequest()
+            event_resp = client.list_event2alarm_rule(event_req)
+            if hasattr(event_resp, 'event2alarm_rules') and event_resp.event2alarm_rules:
+                for rule in event_resp.event2alarm_rules:
+                    rule_info = {
+                        "rule_name": getattr(rule, 'rule_name', None),
+                        "rule_id": getattr(rule, 'rule_id', None),
+                        "description": getattr(rule, 'description', None),
+                        "status": getattr(rule, 'status', None),
+                    }
+                    event_rules.append(rule_info)
+        except Exception as e:
+            pass
+        
+        # 获取告警行动规则
+        action_rules = []
+        try:
+            action_req = ListActionRuleRequest()
+            action_resp = client.list_action_rule(action_req)
+            if hasattr(action_resp, 'action_rules') and action_resp.action_rules:
+                for rule in action_resp.action_rules:
+                    rule_info = {
+                        "rule_name": getattr(rule, 'rule_name', None),
+                        "desc": getattr(rule, 'desc', None),
+                        "type": getattr(rule, 'type', None),
+                        "notification_template": getattr(rule, 'notification_template', None),
+                        "time_zone": getattr(rule, 'time_zone', None),
+                        "create_time": getattr(rule, 'create_time', None),
+                        "update_time": getattr(rule, 'update_time', None),
+                    }
+                    # 获取SMN主题
+                    smn_topics = getattr(rule, 'smn_topics', [])
+                    if smn_topics:
+                        rule_info["smn_topics"] = [
+                            {
+                                "name": getattr(t, 'name', None),
+                                "topic_urn": getattr(t, 'topic_urn', None),
+                                "status": getattr(t, 'status', None),
+                            } for t in smn_topics
+                        ]
+                    action_rules.append(rule_info)
+        except Exception as e:
+            pass
+        
+        return {
+            "success": True,
+            "region": region,
+            "action": "list_aom_alerts",
+            "threshold_alarm_rules_count": len(alarm_rules),
+            "threshold_alarm_rules": alarm_rules,
+            "event_alarm_rules_count": len(event_rules),
+            "event_alarm_rules": event_rules,
+            "action_rules_count": len(action_rules),
+            "action_rules": action_rules,
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
+def list_aom_alarm_rules(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
+    """List AOM alarm rules (threshold alarms)
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+        limit: Maximum number of rules to return (default: 100)
+        offset: Offset for pagination (default: 0)
+    
+    Returns:
+        Dict with success status and list of alarm rules
+    """
+    if not SDK_AVAILABLE:
+        return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+    
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Credentials not provided"}
+    
+    try:
+        from huaweicloudsdkaom.v2 import ListAlarmRuleRequest, ListServiceDiscoveryRulesRequest
+        
+        client = create_aom_client(region, access_key, secret_key, proj_id)
+        
+        # 告警规则
+        alarm_request = ListAlarmRuleRequest()
+        alarm_request.limit = limit
+        alarm_request.offset = offset
+        
+        alarm_response = client.list_alarm_rule(alarm_request)
+        
+        rules = []
+        if hasattr(alarm_response, 'alarm_rules') and alarm_response.alarm_rules:
+            for rule in alarm_response.alarm_rules:
+                rule_info = {
+                    "rule_name": getattr(rule, 'alarm_rule_name', None),
+                    "rule_id": getattr(rule, 'alarm_rule_id', None),
+                    "rule_description": getattr(rule, 'alarm_rule_description', None),
+                    "rule_status": getattr(rule, 'alarm_rule_status', None),
+                    "metric_name": getattr(rule, 'metric_name', None),
+                    "metric_namespace": getattr(rule, 'namespace', None),
+                    "resource_id": getattr(rule, 'resource_id', None),
+                    "alarm_level": getattr(rule, 'alarm_level', None),
+                    "created_at": str(getattr(rule, 'create_time', None)) if getattr(rule, 'create_time', None) else None,
+                    "updated_at": str(getattr(rule, 'update_time', None)) if getattr(rule, 'update_time', None) else None,
+                }
+                rules.append(rule_info)
+        
+        # 服务发现规则
+        sd_request = ListServiceDiscoveryRulesRequest()
+        sd_response = client.list_service_discovery_rules(sd_request)
+        
+        discoveries = []
+        if hasattr(sd_response, 'service_discovery_rules') and sd_response.service_discovery_rules:
+            for sd in sd_response.service_discovery_rules:
+                sd_info = {
+                    "id": getattr(sd, 'service_discovery_id', None),
+                    "name": getattr(sd, 'service_discovery_name', None),
+                    "status": getattr(sd, 'status', None),
+                    "type": getattr(sd, 'service_discovery_type', None),
+                }
+                discoveries.append(sd_info)
+        
+        return {
+            "success": True,
+            "region": region,
+            "action": "list_aom_alarm_rules",
+            "alarm_rules_count": len(rules),
+            "alarm_rules": rules,
+            "service_discovery_count": len(discoveries),
+            "service_discovery_rules": discoveries
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
+def list_aom_service_discovery(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+    """List AOM service discovery rules
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+    
+    Returns:
+        Dict with success status and list of service discovery rules
+    """
+    if not SDK_AVAILABLE:
+        return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+    
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Credentials not provided"}
+    
+    try:
+        from huaweicloudsdkaom.v2 import ListServiceDiscoveryRulesRequest
+        
+        client = create_aom_client(region, access_key, secret_key, proj_id)
+        
+        request = ListServiceDiscoveryRulesRequest()
+        
+        response = client.list_service_discovery_rules(request)
+        
+        discoveries = []
+        if hasattr(response, 'service_discovery_rules') and response.service_discovery_rules:
+            for sd in response.service_discovery_rules:
+                sd_info = {
+                    "id": getattr(sd, 'service_discovery_id', None),
+                    "name": getattr(sd, 'service_discovery_name', None),
+                    "status": getattr(sd, 'status', None),
+                    "type": getattr(sd, 'service_discovery_type', None),
+                }
+                discoveries.append(sd_info)
+        
+        return {
+            "success": True,
+            "region": region,
+            "action": "list_aom_service_discovery",
+            "count": len(discoveries),
+            "service_discoveries": discoveries
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
+def list_aom_action_rules(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+    """List AOM action rules (notification rules)
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+    
+    Returns:
+        Dict with success status and list of action rules
+    """
+    if not SDK_AVAILABLE:
+        return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+    
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Credentials not provided"}
+    
+    try:
+        from huaweicloudsdkaom.v2 import ListActionRuleRequest
+        
+        client = create_aom_client(region, access_key, secret_key, proj_id)
+        
+        request = ListActionRuleRequest()
+        
+        response = client.list_action_rule(request)
+        
+        rules = []
+        if hasattr(response, 'action_rules') and response.action_rules:
+            for rule in response.action_rules:
+                rule_info = {
+                    "rule_name": getattr(rule, 'rule_name', None),
+                    "description": getattr(rule, 'desc', None),
+                    "type": getattr(rule, 'type', None),
+                    "notification_template": getattr(rule, 'notification_template', None),
+                    "time_zone": getattr(rule, 'time_zone', None),
+                    "create_time": getattr(rule, 'create_time', None),
+                    "update_time": getattr(rule, 'update_time', None),
+                    "user_name": getattr(rule, 'user_name', None),
+                }
+                
+                # 获取SMN主题
+                smn_topics = getattr(rule, 'smn_topics', [])
+                if smn_topics:
+                    rule_info["smn_topics"] = [
+                        {
+                            "name": getattr(t, 'name', None),
+                            "topic_urn": getattr(t, 'topic_urn', None),
+                            "status": getattr(t, 'status', None),
+                            "push_policy": getattr(t, 'push_policy', None),
+                        } for t in smn_topics
+                    ]
+                
+                rules.append(rule_info)
+        
+        return {
+            "success": True,
+            "region": region,
+            "action": "list_aom_action_rules",
+            "count": len(rules),
+            "action_rules": rules
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
+def list_aom_mute_rules(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+    """List AOM mute rules (silence rules)
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+    
+    Returns:
+        Dict with success status and list of mute rules
+    """
+    if not SDK_AVAILABLE:
+        return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+    
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Credentials not provided"}
+    
+    try:
+        from huaweicloudsdkaom.v2 import ListMuteRuleRequest
+        
+        client = create_aom_client(region, access_key, secret_key, proj_id)
+        
+        request = ListMuteRuleRequest()
+        
+        response = client.list_mute_rule(request)
+        
+        rules = []
+        if hasattr(response, 'mute_rules') and response.mute_rules:
+            for rule in response.mute_rules:
+                rule_info = {
+                    "rule_id": getattr(rule, 'rule_id', None),
+                    "rule_name": getattr(rule, 'rule_name', None),
+                    "description": getattr(rule, 'description', None),
+                    "status": getattr(rule, 'status', None),
+                    "create_time": getattr(rule, 'create_time', None),
+                    "update_time": getattr(rule, 'update_time', None),
+                }
+                rules.append(rule_info)
+        
+        return {
+            "success": True,
+            "region": region,
+            "action": "list_aom_mute_rules",
+            "count": len(rules),
+            "mute_rules": rules
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
+def list_aom_current_alarms(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, event_type: str = "active_alert", event_severity: str = None, time_range: str = None, limit: int = 100) -> Dict[str, Any]:
+    """List AOM events and alerts using ListEvents API
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+        event_type: Query type - 'active_alert' (active alerts), 'history_alert' (historical alerts), or empty for all (default: 'active_alert')
+        event_severity: Filter by severity - 'Critical', 'Major', 'Minor', 'Info' (optional)
+        time_range: Time range in format 'startTime.endTime.duration', e.g., '-1.-1.60' for last 60 minutes (default: last 24 hours)
+        limit: Maximum number of events to return (default: 100)
+    
+    Returns:
+        Dict with success status and list of events/alerts
+    
+    API Reference: https://support.huaweicloud.com/api-aom/ListEvents.html
+    """
+    if not SDK_AVAILABLE:
+        return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+    
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Credentials not provided"}
+    
+    try:
+        from huaweicloudsdkaom.v2 import (
+            ListEventsRequest, 
+            EventQueryParam2,
+            RelationModel,
+            EventQueryParam2Sort
+        )
+        
+        client = create_aom_client(region, access_key, secret_key, proj_id)
+        
+        # 构建请求
+        request = ListEventsRequest()
+        
+        # 设置查询类型
+        if event_type:
+            request.type = event_type
+        
+        request.limit = limit
+        
+        # 构建请求体
+        body = EventQueryParam2()
+        
+        # 时间范围：默认最近24小时
+        if time_range:
+            body.time_range = time_range
+        else:
+            body.time_range = "-1.-1.1440"  # 最近24小时 (1440分钟)
+        
+        # 构建查询条件
+        metadata_relations = []
+        
+        # 事件类型条件
+        metadata_relations.append(
+            RelationModel(
+                key="event_type",
+                value=["alarm"],
+                relation="AND"
+            )
+        )
+        
+        # 严重级别条件
+        if event_severity:
+            severities = [event_severity] if isinstance(event_severity, str) else event_severity
+            metadata_relations.append(
+                RelationModel(
+                    key="event_severity",
+                    value=severities,
+                    relation="AND"
+                )
+            )
+        else:
+            # 默认查询所有级别
+            metadata_relations.append(
+                RelationModel(
+                    key="event_severity",
+                    value=["Critical", "Major", "Minor", "Info"],
+                    relation="AND"
+                )
+            )
+        
+        body.metadata_relation = metadata_relations
+        
+        # 排序：按开始时间倒序
+        sort = EventQueryParam2Sort(
+            order_by=["starts_at"],
+            order="desc"
+        )
+        body.sort = sort
+        
+        # 搜索条件（可选）
+        body.search = ""
+        
+        request.body = body
+        
+        # 发送请求
+        response = client.list_events(request)
+        
+        # 解析响应
+        events = []
+        if hasattr(response, 'events') and response.events:
+            for event in response.events:
+                event_info = {
+                    'id': getattr(event, 'id', None),
+                    'event_sn': getattr(event, 'event_sn', None),
+                    'starts_at': getattr(event, 'starts_at', None),
+                    'ends_at': getattr(event, 'ends_at', None),
+                    'arrives_at': getattr(event, 'arrives_at', None),
+                    'timeout': getattr(event, 'timeout', None),
+                    'enterprise_project_id': getattr(event, 'enterprise_project_id', None),
+                }
+                
+                # 解析metadata
+                metadata = getattr(event, 'metadata', {})
+                if metadata:
+                    event_info['event_name'] = metadata.get('event_name')
+                    event_info['event_severity'] = metadata.get('event_severity')
+                    event_info['event_type'] = metadata.get('event_type')
+                    event_info['resource_provider'] = metadata.get('resource_provider')
+                    event_info['resource_type'] = metadata.get('resource_type')
+                    event_info['resource_id'] = metadata.get('resource_id')
+                
+                # 从resource_id解析集群信息
+                resource_id = metadata.get('resource_id', '') if metadata else ''
+                if resource_id:
+                    # 解析格式: clusterName=xxx;clusterID=xxx;...
+                    parts = resource_id.split(';')
+                    for part in parts:
+                        if '=' in part:
+                            key, value = part.split('=', 1)
+                            if key == 'clusterName':
+                                event_info['cluster_name'] = value
+                            elif key == 'clusterID':
+                                event_info['cluster_id'] = value
+                            elif key == 'namespace':
+                                event_info['namespace'] = value
+                            elif key == 'name':
+                                event_info['pod_name'] = value
+                            elif key == 'kind':
+                                event_info['resource_kind'] = value
+                            elif key == 'clusterAliasName':
+                                event_info['cluster_alias_name'] = value
+                
+                # 解析annotations
+                annotations = getattr(event, 'annotations', {})
+                if annotations:
+                    event_info['message'] = annotations.get('message')
+                    event_info['alarm_probableCause_zh_cn'] = annotations.get('alarm_probableCause_zh_cn')
+                    event_info['alarm_fix_suggestion_zh_cn'] = annotations.get('alarm_fix_suggestion_zh_cn')
+                
+                # 判断告警状态
+                ends_at = getattr(event, 'ends_at', None)
+                if ends_at and ends_at > 0:
+                    event_info['status'] = 'resolved'
+                else:
+                    event_info['status'] = 'firing'
+                
+                events.append(event_info)
+        
+        # 分页信息
+        page_info = {}
+        if hasattr(response, 'page_info') and response.page_info:
+            page_info = {
+                'current_count': getattr(response.page_info, 'current_count', 0),
+                'next_marker': getattr(response.page_info, 'next_marker', None),
+                'previous_marker': getattr(response.page_info, 'previous_marker', None),
+            }
+        
+        # 统计
+        firing_count = sum(1 for e in events if e.get('status') == 'firing')
+        resolved_count = sum(1 for e in events if e.get('status') == 'resolved')
+        
+        # 按严重级别统计
+        severity_stats = {}
+        for e in events:
+            sev = e.get('event_severity', 'Unknown')
+            severity_stats[sev] = severity_stats.get(sev, 0) + 1
+        
+        return {
+            "success": True,
+            "region": region,
+            "action": "list_aom_current_alarms",
+            "api": "ListEvents",
+            "query_type": event_type,
+            "time_range": body.time_range,
+            "total_count": len(events),
+            "firing_count": firing_count,
+            "resolved_count": resolved_count,
+            "severity_stats": severity_stats,
+            "events": events,
+            "page_info": page_info
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
 
 
 def main():
@@ -3974,6 +8795,13 @@ def main():
             sys.exit(1)
         result = list_cce_addons(region, cluster_id, ak, sk, project_id)
 
+    elif action == "huawei_get_cce_kubeconfig":
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        duration = int(params.get("duration", 30))
+        result = get_cce_kubeconfig(region, cluster_id, ak, sk, project_id, duration)
+
     elif action == "huawei_list_aom_instances":
         if not region:
             print(json.dumps({"success": False, "error": "region is required"}))
@@ -4008,6 +8836,141 @@ def main():
             ak=ak, sk=sk, project_id=project_id
         )
 
+    elif action == "huawei_cce_cluster_inspection":
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        if not cluster_id:
+            print(json.dumps({"success": False, "error": "cluster_id is required"}))
+            sys.exit(1)
+        # 调用独立的巡检模块
+        from inspection import cce_cluster_inspection
+        result = cce_cluster_inspection(region, cluster_id, ak, sk, project_id)
+
+    elif action == "huawei_export_inspection_report":
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        if not cluster_id:
+            print(json.dumps({"success": False, "error": "cluster_id is required"}))
+            sys.exit(1)
+        output_file = params.get("output_file", f"/tmp/cce_inspection_report_{cluster_id[:8]}.html")
+        # 调用独立的巡检模块
+        from inspection import export_inspection_report
+        result = export_inspection_report(region, cluster_id, output_file, ak, sk)
+
+    elif action == "huawei_pod_status_inspection":
+        # Pod 状态巡检
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        from pod_inspection import pod_status_inspection
+        check_result, issues = pod_status_inspection(region, cluster_id, ak, sk, project_id)
+        result = {"success": True, "check": check_result, "issues": issues}
+
+    elif action == "huawei_addon_pod_monitoring_inspection":
+        # 插件 Pod 监控巡检
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        from pod_inspection import addon_pod_monitoring_inspection
+        from inspection import _get_aom_instance, _get_cluster_name, _get_all_pods_map
+        aom_instance_id = _get_aom_instance(region, ak, sk, project_id)
+        cluster_name = _get_cluster_name(region, cluster_id, ak, sk, project_id)
+        all_pods_map = _get_all_pods_map(region, cluster_id, ak, sk, project_id)
+        check_result, issues = addon_pod_monitoring_inspection(region, cluster_id, aom_instance_id, cluster_name, ak, sk, project_id, all_pods_map)
+        result = {"success": True, "check": check_result, "issues": issues}
+
+    elif action == "huawei_biz_pod_monitoring_inspection":
+        # 业务 Pod 监控巡检
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        from pod_inspection import biz_pod_monitoring_inspection
+        from inspection import _get_aom_instance, _get_cluster_name, _get_all_pods_map, _get_all_namespaces
+        aom_instance_id = _get_aom_instance(region, ak, sk, project_id)
+        cluster_name = _get_cluster_name(region, cluster_id, ak, sk, project_id)
+        all_pods_map = _get_all_pods_map(region, cluster_id, ak, sk, project_id)
+        all_namespaces = _get_all_namespaces(region, cluster_id, ak, sk, project_id)
+        check_result, issues = biz_pod_monitoring_inspection(region, cluster_id, aom_instance_id, cluster_name, ak, sk, project_id, all_pods_map, all_namespaces)
+        result = {"success": True, "check": check_result, "issues": issues}
+
+    elif action == "huawei_node_status_inspection":
+        # Node 状态巡检
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        from node_inspection import node_status_inspection
+        check_result, issues = node_status_inspection(region, cluster_id, ak, sk, project_id)
+        result = {"success": True, "check": check_result, "issues": issues}
+
+    elif action == "huawei_node_resource_inspection":
+        # 节点资源监控巡检
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        from node_inspection import node_resource_monitoring_inspection
+        from inspection import _get_aom_instance, _get_cluster_name
+        aom_instance_id = _get_aom_instance(region, ak, sk, project_id)
+        cluster_name = _get_cluster_name(region, cluster_id, ak, sk, project_id)
+        check_result, issues = node_resource_monitoring_inspection(region, cluster_id, aom_instance_id, cluster_name, ak, sk, project_id)
+        result = {"success": True, "check": check_result, "issues": issues}
+
+    elif action == "huawei_event_inspection":
+        # Event 巡检
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        from alarm_inspection import event_inspection
+        check_result, issues = event_inspection(region, cluster_id, ak, sk, project_id)
+        result = {"success": True, "check": check_result, "issues": issues}
+
+    elif action == "huawei_aom_alarm_inspection":
+        # AOM 告警巡检
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        from alarm_inspection import aom_alarm_inspection
+        from inspection import _get_cluster_name
+        cluster_name = _get_cluster_name(region, cluster_id, ak, sk, project_id)
+        check_result, issues = aom_alarm_inspection(region, cluster_id, cluster_name, ak, sk, project_id)
+        result = {"success": True, "check": check_result, "issues": issues}
+
+    elif action == "huawei_elb_monitoring_inspection":
+        # ELB 负载均衡监控巡检
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        from network_inspection import elb_monitoring_inspection
+        from inspection import _get_aom_instance, _get_cluster_name
+        aom_instance_id = _get_aom_instance(region, ak, sk, project_id)
+        cluster_name = _get_cluster_name(region, cluster_id, ak, sk, project_id)
+        check_result, issues = elb_monitoring_inspection(region, cluster_id, aom_instance_id, cluster_name, ak, sk, project_id)
+        result = {"success": True, "check": check_result, "issues": issues}
+
+    elif action == "huawei_get_cce_pod_metrics":
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        pod_namespace = params.get("namespace")
+        pod_label_selector = params.get("label_selector")
+        pod_top_n = int(params.get("top_n", 10))
+        pod_hours = int(params.get("hours", 1))
+        cpu_query = params.get("cpu_query")
+        memory_query = params.get("memory_query")
+        result = get_cce_pod_metrics(region, cluster_id, ak, sk, project_id, namespace=pod_namespace, label_selector=pod_label_selector, top_n=pod_top_n, hours=pod_hours, cpu_query=cpu_query, memory_query=memory_query)
+
+    elif action == "huawei_get_cce_node_metrics":
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        node_top_n = int(params.get("top_n", 10))
+        node_hours = int(params.get("hours", 1))
+        cpu_query = params.get("cpu_query")
+        memory_query = params.get("memory_query")
+        disk_query = params.get("disk_query")
+        result = get_cce_node_metrics(region, cluster_id, ak, sk, project_id, top_n=node_top_n, hours=node_hours, cpu_query=cpu_query, memory_query=memory_query, disk_query=disk_query)
+
     elif action == "huawei_resize_cce_nodepool":
         if not region or not cluster_id or not nodepool_id:
             print(json.dumps({"success": False, "error": "region, cluster_id, and nodepool_id are required"}))
@@ -4020,7 +8983,8 @@ def main():
         except ValueError:
             print(json.dumps({"success": False, "error": "node_count must be an integer"}))
             sys.exit(1)
-        result = resize_node_pool(region, cluster_id, nodepool_id, node_count, ak, sk, project_id)
+        confirm_resize = params.get("confirm", "false").lower() == "true"
+        result = resize_node_pool(region, cluster_id, nodepool_id, node_count, confirm_resize, ak, sk, project_id)
 
     elif action == "huawei_list_evs":
         if not region:
@@ -4038,7 +9002,7 @@ def main():
         if not region or not cluster_id:
             print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
             sys.exit(1)
-        result = get_cce_cluster_pods(region, cluster_id, ak, sk, project_id, namespace)
+        result = get_kubernetes_pods(region, cluster_id, ak, sk, project_id, namespace)
 
     elif action == "huawei_get_cce_namespaces":
         if not region or not cluster_id:
@@ -4087,11 +9051,11 @@ def main():
             sys.exit(1)
         result = delete_cce_workload(region, cluster_id, workload_type, workload_name, workload_namespace, confirm, ak, sk, project_id)
 
-    elif action == "huawei_get_cce_nodes":
+    elif action == "huawei_get_kubernetes_nodes":
         if not region or not cluster_id:
             print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
             sys.exit(1)
-        result = get_cce_cluster_nodes(region, cluster_id, ak, sk, project_id)
+        result = get_kubernetes_nodes(region, cluster_id, ak, sk, project_id)
 
     elif action == "huawei_get_cce_events":
         if not region or not cluster_id:
@@ -4111,6 +9075,18 @@ def main():
             sys.exit(1)
         result = get_cce_cluster_pvs(region, cluster_id, ak, sk, project_id)
 
+    elif action == "huawei_get_cce_services":
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        result = get_kubernetes_services(region, cluster_id, ak, sk, project_id, namespace)
+
+    elif action == "huawei_get_cce_ingresses":
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        result = get_kubernetes_ingresses(region, cluster_id, ak, sk, project_id, namespace)
+
     elif action == "huawei_list_elb":
         if not region:
             print(json.dumps({"success": False, "error": "region is required"}))
@@ -4128,6 +9104,10 @@ def main():
             print(json.dumps({"success": False, "error": "region and loadbalancer_id are required"}))
             sys.exit(1)
         result = get_elb_metrics(region, loadbalancer_id, ak, sk, project_id)
+
+    elif action == "huawei_list_supported_regions":
+        # List all supported regions (no credentials required)
+        result = list_supported_regions()
 
     elif action == "huawei_list_projects":
         # List all projects (no region required, IAM is global)
@@ -4157,6 +9137,47 @@ def main():
             print(json.dumps({"success": False, "error": "region and eip_id are required"}))
             sys.exit(1)
         result = get_eip_metrics(region, eip_id, ak, sk, project_id)
+
+    elif action == "huawei_list_aom_alerts":
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        alert_status = params.get("alert_status")
+        severity = params.get("severity")
+        result = list_aom_alerts(region, ak, sk, project_id, alert_status, severity, limit)
+
+    elif action == "huawei_list_aom_alarm_rules":
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        result = list_aom_alarm_rules(region, ak, sk, project_id, limit, offset)
+
+    elif action == "huawei_list_aom_service_discovery":
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        result = list_aom_service_discovery(region, ak, sk, project_id)
+
+    elif action == "huawei_list_aom_action_rules":
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        result = list_aom_action_rules(region, ak, sk, project_id)
+
+    elif action == "huawei_list_aom_mute_rules":
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        result = list_aom_mute_rules(region, ak, sk, project_id)
+
+    elif action == "huawei_list_aom_current_alarms":
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        event_type = params.get("event_type", "active_alert")
+        event_severity = params.get("event_severity")
+        time_range = params.get("time_range")
+        result = list_aom_current_alarms(region, ak, sk, project_id, event_type, event_severity, time_range, limit)
 
     else:
         result = {
