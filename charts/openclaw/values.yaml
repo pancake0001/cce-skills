@@ -9,6 +9,8 @@ fullnameOverride: ""
 # Image configuration
 image:
   # -- Container image repository
+  # For China users, use Huawei Cloud mirror:
+  #   repository: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/ghcr.io/openclaw/openclaw
   repository: ghcr.io/openclaw/openclaw
   # -- Container image tag
   tag: "2026.3.13-1"
@@ -140,6 +142,8 @@ chromium:
   enabled: true
   image:
     # -- Chromium container image repository
+    # For China users, use Huawei Cloud mirror:
+    #   repository: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/zenika/alpine-chrome
     repository: zenika/alpine-chrome
     # -- Chromium container image tag
     tag: "124"

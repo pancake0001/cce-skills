@@ -378,6 +378,45 @@ http://localhost:18790
 
 ## 最佳实践
 
+### 国内镜像加速（华为云 SWR）
+
+国内环境拉取 Docker Hub 和 GHCR 镜像可能遇到网络问题，建议使用华为云 SWR 镜像加速：
+
+**Helm values 配置：**
+
+```yaml
+image:
+  repository: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/ghcr.io/openclaw/openclaw
+  tag: "2026.3.13-1"
+  pullPolicy: IfNotPresent
+
+chromium:
+  enabled: true
+  image:
+    repository: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/zenika/alpine-chrome
+    tag: "124"
+```
+
+**镜像命名规则：**
+
+| 原始镜像 | 华为云镜像 |
+|---------|-----------|
+| `ghcr.io/openclaw/openclaw` | `swr.cn-north-4.myhuaweicloud.com/ddn-k8s/ghcr.io/openclaw/openclaw` |
+| `zenika/alpine-chrome` | `swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/zenika/alpine-chrome` |
+| `docker.io/library/xxx` | `swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/xxx` |
+
+**格式：** `swr.cn-north-4.myhuaweicloud.com/ddn-k8s/{原始镜像地址}`
+
+**验证镜像拉取：**
+
+```bash
+# 测试 OpenClaw 镜像
+docker pull swr.cn-north-4.myhuaweicloud.com/ddn-k8s/ghcr.io/openclaw/openclaw:2026.3.13-1
+
+# 测试 Chromium 镜像
+docker pull swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/zenika/alpine-chrome:124
+```
+
 ### 飞书对接
 
 **前置条件：飞书应用配置**
