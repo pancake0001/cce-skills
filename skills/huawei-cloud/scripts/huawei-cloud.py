@@ -8847,6 +8847,55 @@ def main():
         from inspection import cce_cluster_inspection
         result = cce_cluster_inspection(region, cluster_id, ak, sk, project_id)
 
+    elif action == "huawei_cce_cluster_inspection_parallel":
+        # 并行模式巡检
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        if not cluster_id:
+            print(json.dumps({"success": False, "error": "cluster_id is required"}))
+            sys.exit(1)
+        max_workers = int(params.get("max_workers", 4))
+        from inspection_subagent import cce_cluster_inspection_parallel
+        result = cce_cluster_inspection_parallel(region, cluster_id, ak, sk, project_id, max_workers)
+
+    elif action == "huawei_cce_cluster_inspection_subagent":
+        # Subagent模式 - 返回任务列表供主agent启动多个subagent
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        if not cluster_id:
+            print(json.dumps({"success": False, "error": "cluster_id is required"}))
+            sys.exit(1)
+        from subagent_dispatcher import generate_auto_subagent_info
+        result = generate_auto_subagent_info(region, cluster_id, ak, sk, project_id)
+
+    elif action == "huawei_cce_cluster_inspection_subagent_legacy":
+        # Subagent模式(旧版) - 返回任务列表供主agent启动多个subagent
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        if not cluster_id:
+            print(json.dumps({"success": False, "error": "cluster_id is required"}))
+            sys.exit(1)
+        from subagent_dispatcher import generate_subagent_task_list
+        result = generate_subagent_task_list(region, cluster_id, ak, sk, project_id)
+
+    elif action == "huawei_aggregate_inspection_results":
+        # 聚合subagent结果
+        results_json = params.get("results")
+        cluster_info_json = params.get("cluster_info")
+        if not results_json or not cluster_info_json:
+            print(json.dumps({"success": False, "error": "results and cluster_info are required"}))
+            sys.exit(1)
+        from subagent_dispatcher import aggregate_subagent_results
+        try:
+            results = json.loads(results_json) if isinstance(results_json, str) else results_json
+            cluster_info = json.loads(cluster_info_json) if isinstance(cluster_info_json, str) else cluster_info_json
+            result = aggregate_subagent_results(results, cluster_info)
+        except Exception as e:
+            result = {"success": False, "error": str(e)}
+
     elif action == "huawei_export_inspection_report":
         if not region:
             print(json.dumps({"success": False, "error": "region is required"}))
@@ -9178,6 +9227,91 @@ def main():
         event_severity = params.get("event_severity")
         time_range = params.get("time_range")
         result = list_aom_current_alarms(region, ak, sk, project_id, event_type, event_severity, time_range, limit)
+
+    # ========== LTS 日志服务工具 ==========
+    elif action == "huawei_list_log_groups":
+        # 查询日志组列表
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        from lts_tools import list_log_groups
+        result = list_log_groups(region, ak, sk, project_id)
+
+    elif action == "huawei_list_log_streams":
+        # 查询日志流列表
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        log_group_id = params.get("log_group_id")
+        from lts_tools import list_log_streams
+        result = list_log_streams(region, log_group_id, ak, sk, project_id)
+
+    elif action == "huawei_query_logs":
+        # 查询日志内容
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        log_group_id = params.get("log_group_id")
+        log_stream_id = params.get("log_stream_id")
+        if not log_group_id or not log_stream_id:
+            print(json.dumps({"success": False, "error": "log_group_id and log_stream_id are required"}))
+            sys.exit(1)
+        start_time = params.get("start_time")
+        end_time = params.get("end_time")
+        keywords = params.get("keywords")
+        query_limit = int(params.get("limit", 100))
+        from lts_tools import query_logs_by_keywords
+        result = query_logs_by_keywords(region, log_group_id, log_stream_id, keywords, start_time, end_time, query_limit, ak, sk, project_id)
+
+    elif action == "huawei_query_cce_logs":
+        # 查询CCE集群日志
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        start_time = params.get("start_time")
+        end_time = params.get("end_time")
+        keywords = params.get("keywords")
+        query_limit = int(params.get("limit", 100))
+        from lts_tools import query_cce_cluster_logs
+        result = query_cce_cluster_logs(region, cluster_id, start_time, end_time, keywords, query_limit, ak, sk, project_id)
+
+    elif action == "huawei_find_cce_log_streams":
+        # 查找CCE集群相关的日志流
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        from lts_tools import find_cce_log_streams
+        result = find_cce_log_streams(region, cluster_id, ak, sk, project_id)
+
+    elif action == "huawei_query_aom_logs":
+        # 查询AOM应用日志
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        namespace = params.get("namespace")
+        pod_name = params.get("pod_name")
+        container_name = params.get("container_name")
+        start_time = params.get("start_time")
+        end_time = params.get("end_time")
+        keywords = params.get("keywords")
+        query_limit = int(params.get("limit", 100))
+        from lts_tools import query_aom_logs
+        result = query_aom_logs(region, cluster_id, namespace, pod_name, container_name, start_time, end_time, keywords, query_limit, ak, sk, project_id)
+
+    elif action == "huawei_get_recent_logs":
+        # 获取最近的日志
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        log_group_id = params.get("log_group_id")
+        log_stream_id = params.get("log_stream_id")
+        if not log_group_id or not log_stream_id:
+            print(json.dumps({"success": False, "error": "log_group_id and log_stream_id are required"}))
+            sys.exit(1)
+        hours = int(params.get("hours", 1))
+        query_limit = int(params.get("limit", 100))
+        from lts_tools import get_recent_logs
+        result = get_recent_logs(region, log_group_id, log_stream_id, hours, query_limit, ak, sk, project_id)
 
     else:
         result = {

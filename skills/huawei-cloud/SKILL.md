@@ -610,16 +610,157 @@ Returns:
 - normal: 使用率 <= 50%
 
 #### huawei_cce_cluster_inspection
-CCE 集群巡检工具，执行 **7 大检查项**并返回巡检结果。
+CCE 集群巡检工具，执行 **8 大检查项**并返回巡检结果（串行模式）。
 
 检查项:
 1. **Pod状态巡检** - 检查Pod运行状态、重启次数、异常状态
 2. **Node状态巡检** - 检查节点状态、Ready/NotReady数量
-3. **集群Pod监控巡检** - 检查CPU/内存使用率>80%的Pod数量及Top 10
-4. **节点资源监控巡检** - 检查CPU/内存/磁盘使用率>80%的节点数量及Top 10
-5. **Event巡检** - 检查关键事件和Warning事件
-6. **AOM告警巡检** - 检查活跃告警和严重级别
-7. **ELB负载均衡监控巡检** - 检查LoadBalancer类型Service的ELB监控数据（连接数、带宽）
+3. **插件Pod监控巡检** - 检查kube-system/monitoring命名空间的CPU/内存使用率
+4. **业务Pod监控巡检** - 检查业务命名空间的CPU/内存使用率Top 10
+5. **节点资源监控巡检** - 检查CPU/内存/磁盘使用率>80%的节点数量及Top 10
+6. **Event巡检** - 检查关键事件和Warning事件
+7. **AOM告警巡检** - 检查活跃告警和严重级别
+8. **ELB负载均衡监控巡检** - 检查LoadBalancer类型Service的ELB监控数据（连接数、带宽）
+
+#### huawei_cce_cluster_inspection_parallel ⚡
+CCE 集群巡检工具，**并行模式**，使用多线程并行执行巡检任务，大幅提升巡检效率。
+
+**与串行模式的区别：**
+| 特性 | 串行模式 | 并行模式 |
+|------|---------|---------|
+| 执行方式 | 顺序执行 | 多线程并行 |
+| 总耗时 | 各任务耗时之和 | 最长任务耗时 |
+| 适用场景 | 小规模集群 | 大规模集群 |
+| 效率提升 | - | 3-5倍 |
+
+检查项（与串行模式相同）:
+1. **Pod状态巡检** - 检查Pod运行状态、重启次数、异常状态
+2. **Node状态巡检** - 检查节点状态、Ready/NotReady数量
+3. **插件Pod监控巡检** - 检查kube-system/monitoring命名空间的CPU/内存使用率
+4. **业务Pod监控巡检** - 检查业务命名空间的CPU/内存使用率Top 10
+5. **节点资源监控巡检** - 检查CPU/内存/磁盘使用率>80%的节点数量及Top 10
+6. **Event巡检** - 检查关键事件和Warning事件
+7. **AOM告警巡检** - 检查活跃告警和严重级别
+8. **ELB负载均衡监控巡检** - 检查LoadBalancer类型Service的ELB监控数据
+
+Parameters:
+- region (required): 华为云区域 (如 cn-north-4)
+- cluster_id (required): CCE 集群 ID
+- project_id (optional): Project ID
+- ak (optional): Access Key ID
+- sk (optional): Secret Access Key
+- max_workers (optional): 最大并行数 (默认: 4)
+
+Returns:
+```json
+{
+  "success": true,
+  "mode": "parallel",
+  "max_workers": 4,
+  "cluster_id": "xxx",
+  "inspection_time": "2026-03-26 12:00:00",
+  "result": {
+    "status": "HEALTHY",
+    "total_issues": 0,
+    "critical_issues": 0,
+    "warning_issues": 0
+  },
+  "timing": {
+    "start_time": "2026-03-26 12:00:00",
+    "duration_seconds": 15.23,
+    "total_formatted": "15.23s",
+    "preprocess_seconds": 2.15,
+    "parallel_seconds": 13.08,
+    "task_timings": {
+      "pods": 1.23,
+      "nodes": 0.89,
+      "addon_pod_monitoring": 3.45,
+      "biz_pod_monitoring": 2.87,
+      "node_monitoring": 4.12,
+      "events": 1.56,
+      "alarms": 2.34,
+      "elb_monitoring": 2.67
+    }
+  },
+  "checks": {...},
+  "issues": [...],
+  "report": "文本格式报告",
+  "html_report": "HTML格式网页报告"
+}
+```
+
+调用示例:
+```bash
+# 并行巡检（默认4个线程）
+python3 huawei-cloud.py huawei_cce_cluster_inspection_parallel region=cn-north-4 cluster_id=xxx ak=xxx sk=xxx
+
+# 指定并行数
+python3 huawei-cloud.py huawei_cce_cluster_inspection_parallel region=cn-north-4 cluster_id=xxx max_workers=8 ak=xxx sk=xxx
+```
+
+#### huawei_cce_cluster_inspection_subagent 🚀
+CCE 集群巡检工具，**Subagent并行模式**，由主agent启动多个subagent并行执行巡检任务。
+
+**适用场景：**
+- 需要最大程度并行化的大型集群巡检
+- 主agent希望独立管理每个巡检任务的执行
+- 需要将巡检任务分配到多个agent执行
+
+**工作流程：**
+1. 主agent调用此工具获取任务列表
+2. 主agent使用 `sessions_spawn` 启动多个subagent
+3. 每个subagent执行一个巡检任务
+4. 主agent收集所有subagent结果并汇总
+
+Returns:
+```json
+{
+  "success": true,
+  "task_count": 8,
+  "cluster_name": "test-cce-ai-diagnose",
+  "aom_instance_id": "xxx",
+  "preprocess_data": {
+    "cluster_name": "...",
+    "aom_instance_id": "...",
+    "all_pods_map": {...},
+    "all_namespaces": [...]
+  },
+  "tasks": [
+    {
+      "task_id": "pods",
+      "name": "Pod状态巡检",
+      "action": "huawei_pod_status_inspection",
+      "description": "检查Pod运行状态、容器重启次数、异常状态",
+      "command": "cd skills/huawei-cloud/scripts && python3 huawei-cloud.py huawei_pod_status_inspection ..."
+    },
+    ...
+  ]
+}
+```
+
+调用示例:
+```bash
+# 获取subagent任务列表
+python3 huawei-cloud.py huawei_cce_cluster_inspection_subagent region=cn-north-4 cluster_id=xxx ak=xxx sk=xxx
+```
+
+**主Agent使用示例：**
+```python
+# 1. 获取任务列表
+result = call_tool("huawei_cce_cluster_inspection_subagent", {...})
+tasks = result["tasks"]
+preprocess_data = result["preprocess_data"]
+
+# 2. 并行启动subagent
+for task in tasks:
+    spawn_subagent(
+        task=f"执行巡检: {task['name']}\n{task['command']}",
+        label=f"inspection-{task['task_id']}"
+    )
+
+# 3. 等待所有subagent完成并收集结果
+# 4. 汇总生成最终报告
+```
 
 Parameters:
 - region (required): 华为云区域 (如 cn-north-4)
@@ -1154,6 +1295,229 @@ huawei_get_cce_pods region="cn-north-4" cluster_id="cluster-xxxxx" namespace="de
 
 # Get project ID
 huawei_get_project_by_region region="cn-north-4"
+```
+
+---
+
+## LTS 日志服务工具
+
+用于查询华为云LTS (Log Tank Service) 日志服务中的日志数据。
+
+### huawei_list_log_groups
+查询日志组列表。
+
+Parameters:
+- region (required): 华为云区域 (如 cn-north-4)
+- ak (optional): Access Key ID
+- sk (optional): Secret Access Key
+- project_id (optional): Project ID
+
+Returns:
+```json
+{
+  "success": true,
+  "total": 5,
+  "log_groups": [
+    {
+      "log_group_id": "xxx",
+      "log_group_name": "CCE-Cluster-Logs",
+      "creation_time": 1234567890000,
+      "ttl_in_days": 7
+    }
+  ]
+}
+```
+
+### huawei_list_log_streams
+查询日志流列表。
+
+Parameters:
+- region (required): 华为云区域
+- log_group_id (optional): 日志组ID，不传则查询所有
+- ak (optional): Access Key ID
+- sk (optional): Secret Access Key
+- project_id (optional): Project ID
+
+Returns:
+```json
+{
+  "success": true,
+  "total": 10,
+  "log_streams": [
+    {
+      "log_stream_id": "xxx",
+      "log_stream_name": "stdout",
+      "log_group_id": "xxx",
+      "creation_time": 1234567890000
+    }
+  ]
+}
+```
+
+### huawei_query_logs
+查询日志内容，支持按时间范围和关键词搜索。
+
+Parameters:
+- region (required): 华为云区域
+- log_group_id (required): 日志组ID
+- log_stream_id (required): 日志流ID
+- start_time (optional): 开始时间 (格式: YYYY-MM-DD HH:MM:SS，默认最近1小时)
+- end_time (optional): 结束时间 (格式: YYYY-MM-DD HH:MM:SS，默认当前时间)
+- keywords (optional): 搜索关键词
+- limit (optional): 返回条数 (默认100)
+- ak (optional): Access Key ID
+- sk (optional): Secret Access Key
+- project_id (optional): Project ID
+
+调用示例:
+```bash
+# 查询最近1小时的日志
+python3 huawei-cloud.py huawei_query_logs \
+  region=cn-north-4 \
+  log_group_id=xxx \
+  log_stream_id=xxx
+
+# 按时间范围查询
+python3 huawei-cloud.py huawei_query_logs \
+  region=cn-north-4 \
+  log_group_id=xxx \
+  log_stream_id=xxx \
+  start_time="2026-03-26 10:00:00" \
+  end_time="2026-03-26 11:00:00"
+
+# 按关键词搜索
+python3 huawei-cloud.py huawei_query_logs \
+  region=cn-north-4 \
+  log_group_id=xxx \
+  log_stream_id=xxx \
+  keywords="ERROR" \
+  limit=200
+```
+
+### huawei_query_cce_logs
+查询CCE集群日志，自动查找集群相关的日志流。
+
+Parameters:
+- region (required): 华为云区域
+- cluster_id (required): CCE集群ID
+- start_time (optional): 开始时间
+- end_time (optional): 结束时间
+- keywords (optional): 搜索关键词
+- limit (optional): 返回条数 (默认100)
+- ak (optional): Access Key ID
+- sk (optional): Secret Access Key
+- project_id (optional): Project ID
+
+调用示例:
+```bash
+# 查询CCE集群最近日志
+python3 huawei-cloud.py huawei_query_cce_logs \
+  region=cn-north-4 \
+  cluster_id=034b98c7-1c4d-11f1-842d-0255ac100249
+
+# 按关键词搜索集群日志
+python3 huawei-cloud.py huawei_query_cce_logs \
+  region=cn-north-4 \
+  cluster_id=034b98c7-1c4d-11f1-842d-0255ac100249 \
+  keywords="Error" \
+  start_time="2026-03-26 00:00:00" \
+  end_time="2026-03-26 12:00:00"
+```
+
+### huawei_find_cce_log_streams
+查找CCE集群相关的日志流。
+
+Parameters:
+- region (required): 华为云区域
+- cluster_id (required): CCE集群ID
+- ak (optional): Access Key ID
+- sk (optional): Secret Access Key
+- project_id (optional): Project ID
+
+Returns:
+```json
+{
+  "success": true,
+  "cluster_id": "xxx",
+  "total": 3,
+  "log_streams": [
+    {
+      "log_stream_id": "xxx",
+      "log_stream_name": "cce-xxx-stdout",
+      "log_group_id": "xxx",
+      "log_group_name": "CCE-Logs"
+    }
+  ]
+}
+```
+
+### huawei_query_aom_logs
+查询AOM应用日志，支持按命名空间、Pod、容器过滤。
+
+Parameters:
+- region (required): 华为云区域
+- cluster_id (optional): CCE集群ID
+- namespace (optional): 命名空间
+- pod_name (optional): Pod名称
+- container_name (optional): 容器名称
+- start_time (optional): 开始时间
+- end_time (optional): 结束时间
+- keywords (optional): 搜索关键词
+- limit (optional): 返回条数 (默认100)
+- ak (optional): Access Key ID
+- sk (optional): Secret Access Key
+- project_id (optional): Project ID
+
+调用示例:
+```bash
+# 查询指定命名空间的日志
+python3 huawei-cloud.py huawei_query_aom_logs \
+  region=cn-north-4 \
+  cluster_id=xxx \
+  namespace=default
+
+# 查询指定Pod的日志
+python3 huawei-cloud.py huawei_query_aom_logs \
+  region=cn-north-4 \
+  cluster_id=xxx \
+  namespace=default \
+  pod_name=nginx-xxx
+
+# 查询包含关键词的日志
+python3 huawei-cloud.py huawei_query_aom_logs \
+  region=cn-north-4 \
+  keywords="Exception" \
+  start_time="2026-03-26 10:00:00"
+```
+
+### huawei_get_recent_logs
+获取最近的日志。
+
+Parameters:
+- region (required): 华为云区域
+- log_group_id (required): 日志组ID
+- log_stream_id (required): 日志流ID
+- hours (optional): 查询最近几小时 (默认1)
+- limit (optional): 返回条数 (默认100)
+- ak (optional): Access Key ID
+- sk (optional): Secret Access Key
+- project_id (optional): Project ID
+
+调用示例:
+```bash
+# 获取最近1小时的日志
+python3 huawei-cloud.py huawei_get_recent_logs \
+  region=cn-north-4 \
+  log_group_id=xxx \
+  log_stream_id=xxx
+
+# 获取最近24小时的日志
+python3 huawei-cloud.py huawei_get_recent_logs \
+  region=cn-north-4 \
+  log_group_id=xxx \
+  log_stream_id=xxx \
+  hours=24 \
+  limit=500
 ```
 
 ## Notes

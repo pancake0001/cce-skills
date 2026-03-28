@@ -25,6 +25,7 @@ spec.loader.exec_module(huawei_cloud)
 
 get_credentials_with_region = huawei_cloud.get_credentials_with_region
 get_kubernetes_events = huawei_cloud.get_kubernetes_events
+list_aom_current_alarms = huawei_cloud.list_aom_current_alarms
 SDK_AVAILABLE = huawei_cloud.SDK_AVAILABLE
 
 
@@ -177,25 +178,19 @@ def aom_alarm_inspection(region: str, cluster_id: str, cluster_name: str, ak: st
         })
     
     try:
-        from huaweicloudsdkaom.v2 import ListActiveAlarmsRequest, AomClient
-        from huaweicloudsdkcore.auth.credentials import BasicCredentials
+        # 使用 list_aom_current_alarms 获取活跃告警（使用 ListEvents API）
+        alarm_result = list_aom_current_alarms(
+            region=region,
+            ak=access_key,
+            sk=secret_key,
+            project_id=proj_id,
+            event_type="active_alert",
+            limit=100
+        )
         
-        aom_client = AomClient.new_builder() \
-            .with_credentials(BasicCredentials(access_key, secret_key, proj_id)) \
-            .with_endpoint(f"aom.{region}.myhuaweicloud.com") \
-            .build()
-        
-        alarm_request = ListActiveAlarmsRequest()
-        alarm_request.event_type = "active_alert"
-        alarm_request.limit = 100
-        
-        alarm_response = aom_client.list_active_alarms(alarm_request)
-        
-        if hasattr(alarm_response, 'metadata') and alarm_response.metadata:
+        if alarm_result.get("success"):
             result["checked"] = True
-            alarms = []
-            if hasattr(alarm_response.metadata, 'alarms') and alarm_response.metadata.alarms:
-                alarms = alarm_response.metadata.alarms
+            alarms = alarm_result.get("events", [])
             
             result["total"] = len(alarms)
             
@@ -204,35 +199,40 @@ def aom_alarm_inspection(region: str, cluster_id: str, cluster_name: str, ak: st
             alarms_by_type = {}
             
             for alarm in alarms:
-                severity = alarm.event_severity or "Info"
+                severity = alarm.get("event_severity", "Info")
                 if severity in severity_breakdown:
                     severity_breakdown[severity] += 1
                 
-                alarm_type = alarm.event_name or "Unknown"
+                alarm_type = alarm.get("event_name", "Unknown")
                 if alarm_type not in alarms_by_type:
                     alarms_by_type[alarm_type] = {"count": 0, "alarms": []}
                 alarms_by_type[alarm_type]["count"] += 1
                 alarms_by_type[alarm_type]["alarms"].append({
-                    "name": alarm.event_name,
+                    "name": alarm.get("event_name"),
                     "severity": severity,
-                    "resource_id": alarm.resource_id,
-                    "message": (alarm.detail or "")[:200]
+                    "resource_id": alarm.get("resource_id"),
+                    "message": (alarm.get("message", ""))[:200]
                 })
                 
                 # 过滤当前集群的告警
-                resource_id = alarm.resource_id or ""
-                if cluster_id in resource_id or cluster_name in resource_id:
+                resource_id = alarm.get("resource_id", "")
+                alarm_cluster_id = alarm.get("cluster_id", "")
+                alarm_cluster_name = alarm.get("cluster_name", "")
+                
+                if cluster_id in resource_id or cluster_id == alarm_cluster_id or cluster_name == alarm_cluster_name:
                     cluster_alarms.append({
-                        "name": alarm.event_name,
+                        "name": alarm.get("event_name"),
                         "severity": severity,
                         "resource_id": resource_id,
-                        "message": (alarm.detail or "")[:200]
+                        "message": (alarm.get("message", ""))[:200],
+                        "pod_name": alarm.get("pod_name"),
+                        "namespace": alarm.get("namespace")
                     })
                     if severity == "Critical":
-                        add_issue("CRITICAL", "重要告警", alarm.event_name,
+                        add_issue("CRITICAL", "重要告警", alarm.get("event_name"),
                             f"严重级别: {severity}, 资源: {resource_id}")
                     elif severity == "Major":
-                        add_issue("WARNING", "重要告警", alarm.event_name,
+                        add_issue("WARNING", "重要告警", alarm.get("event_name"),
                             f"严重级别: {severity}, 资源: {resource_id}")
             
             result["severity_breakdown"] = severity_breakdown
@@ -243,6 +243,8 @@ def aom_alarm_inspection(region: str, cluster_id: str, cluster_name: str, ak: st
                 result["status"] = "FAIL"
             elif severity_breakdown.get("Major", 0) > 0:
                 result["status"] = "WARN"
+        else:
+            result["error"] = alarm_result.get("error", "Unknown error")
     except Exception as e:
         result["error"] = str(e)
     
