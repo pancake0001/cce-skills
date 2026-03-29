@@ -13,12 +13,128 @@ image:
   #   repository: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/ghcr.io/openclaw/openclaw
   repository: ghcr.io/openclaw/openclaw
   # -- Container image tag
-  tag: "2026.3.13-1"
+  tag: "2026.3.23-2"
   # -- Image pull policy
   pullPolicy: IfNotPresent
 
 # -- Image pull secrets for private registries
 imagePullSecrets: []
+
+# =============================================================================
+# Multi-Agent SSH Sandbox Configuration
+# When sandbox.enabled=true, each agent runs in its own isolated sandbox Pod
+# accessed via SSH by the central Gateway.
+# =============================================================================
+sandbox:
+  # -- Enable SSH sandbox mode (each agent gets its own sandbox Pod accessed via SSH)
+  enabled: false
+
+  # -- SSH host key secret name (auto-generated if empty)
+  # The secret should contain: ssh_host_rsa_key, ssh_host_ecdsa_key, ssh_host_ed25519_key
+  hostKeySecret: ""
+
+  # -- Shared workspace PVC for all sandbox pods (ReadWriteMany required)
+  workspace:
+    # -- Enable shared workspace storage
+    enabled: true
+    # -- PVC name (auto-generated if empty)
+    pvcName: ""
+    # -- Storage size
+    size: 10Gi
+    # -- Storage class (must support ReadWriteMany - NFS, AzureFiles, CephFS, etc.)
+    storageClass: ""
+    # -- Access mode
+    accessMode: ReadWriteMany
+
+  # -- SSH sandbox container image (must have SSH server running)
+  image:
+    # -- Container image repository
+    # Build your own based on ghcr.io/openclaw/openclaw-sandbox-common:bookworm-slim
+    # See: https://docs.openclaw.ai/gateway/sandboxing#ssh-backend
+    repository: ghcr.io/openclaw/openclaw-sandbox-common
+    tag: "bookworm-slim"
+    pullPolicy: IfNotPresent
+
+  # -- Resource limits for each sandbox pod
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  # -- Security context for sandbox containers
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
+
+  # -- Environment variables for sandbox pods (e.g., cloud provider credentials)
+  # These are passed to each sandbox container
+  # Example for Huawei Cloud AKSK:
+  #   env:
+  #     - name: HUAWEI_ACCESS_KEY
+  #       value: "your-access-key"
+  #     - name: HUAWEI_SECRET_KEY
+  #       value: "your-secret-key"
+  env: []
+
+  # =============================================================================
+  # Per-Agent Sandbox Configuration
+  # Each agent gets its own sandbox Pod with independent:
+  # - SSH endpoint
+  # - Workspace subdirectory (under shared PVC)
+  # - Tool permissions
+  # =============================================================================
+  agents:
+    # -- List of agents with sandbox configuration
+    # Set sandbox.enabled=true per-agent to enable SSH sandbox for that agent
+    list:
+      # Example (uncomment and configure):
+      # - id: alice
+      #   enabled: true
+      #   workspaceSubPath: workspace-alice
+      #   envSecretRef: "alice-huawei-credentials"  # Secret name for per-agent env vars (e.g., AKSK)
+      #   tools:
+      #     allow: ["*"]
+      #     deny: []
+      # - id: bob
+      #   enabled: true
+      #   workspaceSubPath: workspace-bob
+      #   envSecretRef: "bob-huawei-credentials"  # Secret name for per-agent env vars (e.g., AKSK)
+      #   tools:
+      #     allow: ["read", "exec", "sessions_list", "sessions_history"]
+      #     deny: ["write", "edit", "apply_patch", "delete", "browser"]
+
+  # -- SSH private key for gateway to authenticate to sandbox pods
+  # Generate with: ssh-keygen -t ed25519 -f /tmp/gateway_sandbox_key
+  # The corresponding public key should be added to sandbox pods' authorized_keys
+  # (auto-generated placeholder if empty - must be replaced with real key for production)
+  sshPrivateKey: ""
+
+  # -- Use an existing Kubernetes Secret for the SSH private key instead of storing it in values
+  # If set, sshPrivateKey is ignored. Secret must contain key "privateKey".
+  # Create with: kubectl create secret generic openclaw-ssh-key --from-file=privateKey=/tmp/gateway_sandbox_key -n openclaw
+  sshSecretName: ""
+
+  # -- Use an existing Kubernetes ConfigMap for the authorized_keys instead of storing it in values
+  # If set, authorizedKeys is ignored. ConfigMap must contain key "authorized_keys".
+  # Create with: kubectl create configmap ssh-authorized-keys --from-file=authorized_keys=/tmp/gateway_sandbox_key.pub -n openclaw
+  sshAuthorizedKeysConfigMap: ""
+
+  # -- SSH public key that will be added to each sandbox pod's authorized_keys
+  # This is the public key corresponding to the gateway's sshPrivateKey
+  # Generate with: cat /tmp/gateway_sandbox_key.pub
+  # Example: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI....."
+  # Only used if sshAuthorizedKeysConfigMap is not set
+  authorizedKeys: ""
+
 
 # OpenClaw application settings
 openclaw:
@@ -36,28 +152,111 @@ openclaw:
   agents:
     defaults:
       # -- Primary model in provider/model format
-      model: "anthropic/claude-sonnet-4-20250514"
+      model: "minimax/MiniMax-M2.7"
       # -- Timeout in seconds for agent operations
       timeoutSeconds: 600
       # -- Thinking mode: "low", "high", or "off"
       thinkingDefault: "low"
 
+      # -- Compaction configuration (context compression)
+      # When context gets too long, OpenClaw compacts older history to stay within limits
+      compaction:
+        # -- Enable compaction configuration
+        enabled: true
+        # -- Compaction mode: "default" (recommended) or "safeguard" (experimental, has issues with large contexts)
+        # "default" - direct summarization, more reliable
+        # "safeguard" - chunked summarization, may silently fail on large contexts
+        mode: "default"
+        # -- Model to use for compaction summarization (optional, uses primary model if not set)
+        # Format: provider/model-id
+        # Example: "huaweicloud-maas/DeepSeek-V3" for cheaper/faster summarization
+        model: ""
+        # -- Reserve tokens floor - triggers compaction earlier to avoid context overflow
+        # Recommended: 40000-60000 depending on model context window
+        reserveTokensFloor: 60000
+        # -- Memory flush configuration
+        memoryFlush:
+          # -- Enable memory flush before compaction
+          enabled: true
+          # -- Soft threshold tokens
+          softThresholdTokens: 40000
+          # -- Custom flush prompt (optional)
+          prompt: ""
+
+      # -- Context pruning configuration
+      # Trims old tool results in-memory per request
+      contextPruning:
+        # -- Enable context pruning
+        enabled: true
+        # -- Pruning mode: "cache-ttl"
+        mode: "cache-ttl"
+        # -- Cache TTL duration (e.g., "6h", "30m")
+        ttl: "6h"
+        # -- Number of recent assistant messages to keep
+        keepLastAssistants: 3
+
+    # -- Multi-agent configuration (maps to agents.list in openclaw.json)
+    # Define multiple agents with different permissions for separation of duties
+    # Example: viewer agent for monitoring, operator agent for actions
+    list:
+      # Example configuration:
+      # - id: alice
+      #   workspace: ~/.openclaw/workspace-alice
+      #   sandbox:
+      #     enabled: true
+      #     backend: ssh
+      #     scope: agent
+      #     workspaceAccess: rw
+      #     ssh:
+      #       target: "openclaw-sandbox-alice"
+      #       workspaceRoot: /home/openclaw/workspace
+      #   tools:
+      #     allow: ["*"]
+      #   bindings:
+      #     - channel: telegram
+      #       botToken: "${ALICE_TELEGRAM_BOT_TOKEN}"
+      # - id: bob
+      #   workspace: ~/.openclaw/workspace-bob
+      #   sandbox:
+      #     enabled: true
+      #     backend: ssh
+      #     scope: agent
+      #     workspaceAccess: ro
+      #     ssh:
+      #       target: "openclaw-sandbox-bob"
+      #       workspaceRoot: /home/openclaw/workspace
+      #   tools:
+      #     allow: ["read", "exec", "sessions_list", "sessions_history"]
+      #     deny: ["write", "edit", "apply_patch", "delete", "browser"]
+
   # -- Model providers configuration (maps to models.providers in openclaw.json)
   # Supports additional LLM providers like MiniMax, OpenAI-compatible endpoints, etc.
   # Example for MiniMax (China):
-  #   providers:
-  #     minimax:
-  #       baseUrl: "https://api.minimaxi.com/anthropic"
-  #       apiKey: "${MINIMAX_API_KEY}"
-  #       api: "anthropic-messages"
-  #       models:
-  #         - id: "MiniMax-M2.7"
-  #           name: "MiniMax M2.7"
-  #           reasoning: false
-  #           input: ["text"]
-  #           contextWindow: 200000
-  #           maxTokens: 8192
-  providers: {}
+  providers:
+    minimax:
+      baseUrl: "https://api.minimaxi.com/anthropic"
+      apiKey: ""  # Set via --set openclaw.providers.minimax.apiKey="your-key" or openclaw.configOverrides.auth.profiles.minimax:cn.key
+      api: "anthropic-messages"
+      authHeader: true
+      models:
+        - id: "MiniMax-M2.7"
+          name: "MiniMax M2.7"
+          reasoning: true
+          input: ["text"]
+          cost:
+            input: 0.3
+            output: 1.2
+            cacheRead: 0.06
+            cacheWrite: 0.375
+          contextWindow: 204800
+          maxTokens: 131072
+
+  # -- Authentication profiles for LLM providers
+  # Each profile corresponds to a provider configured in 'providers'
+  # The key (e.g., "minimax:cn") must match the provider ID
+  # Set the API key via --set openclaw.auth.profiles.minimax:cn.key="your-key"
+  auth:
+    profiles: {}
 
   # -- Raw JSON overrides merged into openclaw.json
   # Use this for advanced configuration not covered by other options
@@ -68,7 +267,22 @@ openclaw:
   #         enabled: true
   configOverrides: {}
 
-# -- Custom workspace files for agent persona
+  # -- Multi-agent message routing bindings
+  # Routes incoming messages to specific agents based on channel, account, peer, etc.
+  # See: https://docs.openclaw.ai/concepts/multi-agent#routing-rules
+  bindings: []
+  # Example:
+  # bindings:
+  #   - agentId: alice
+  #     match:
+  #       channel: telegram
+  #       accountId: alice-bot
+  #   - agentId: bob
+  #     match:
+  #       channel: telegram
+  #       accountId: bob-bot
+
+# -- Custom workspace files for agent persona and ops templates
 # These files are copied to /home/openclaw/.openclaw/workspace on first install
 # Subsequent changes to these values will NOT overwrite existing files (to preserve agent experience)
 # To force update, delete the PVC and reinstall, or manually edit files in the container
@@ -105,6 +319,27 @@ workspace:
     - Language: 中文
     - Timezone: UTC+8
 
+  # -- INSPECTION.md: Inspection checklist (for ops agent)
+  inspection: ""
+
+  # -- ALERTS.md: Alert handling rules (for ops agent)
+  alerts: ""
+
+  # -- RUNBOOK.md: Troubleshooting runbook (for ops agent)
+  runbook: ""
+
+  # -- KNOWLEDGE.md: Knowledge base for incidents (for ops agent)
+  knowledge: ""
+
+  # -- GUARDRAILS.md: Safety boundaries and prohibited operations
+  guardrails: ""
+
+  # -- REPORT.md: Report templates
+  report: ""
+
+  # -- AGENTS.md: Multi-agent collaboration guide
+  agents: ""
+
   # -- Additional custom files
   # Key is filename, value is content
   extraFiles: {}
@@ -126,10 +361,12 @@ credentials:
   gatewayToken: ""
   # -- Extra secrets to add to the secret.yaml file as key-value pairs.
   # These will be automatically added as environment variables.
-  # Example:
+  # Example for multi-agent with separate Telegram bots:
   #   extraSecrets:
   #     OPENROUTER_API_KEY: "sk-or-..."
-  #     TELEGRAM_API_KEY: "your-key"
+  #     ALICE_TELEGRAM_BOT_TOKEN: "123456:ABC-..."
+  #     BOB_TELEGRAM_BOT_TOKEN: "789012:DEF-..."
+  # Note: Telegram bot tokens are referenced in openclaw.bindings and openclaw.agents.list
   extraSecrets: {}
   # -- Use an existing secret instead of creating one
   # The secret must contain keys: ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENCLAW_GATEWAY_TOKEN

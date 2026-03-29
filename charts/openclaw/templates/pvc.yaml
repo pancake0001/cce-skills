@@ -8,10 +8,15 @@ metadata:
     {{- with .Values.persistence.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
-  {{- with .Values.persistence.annotations }}
   annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
+    csi.storage.k8s.io/fstype: {{ .Values.persistence.csiFsType | default "obsfs" }}
+    {{- if .Values.persistence.csiSecretName }}
+    csi.storage.k8s.io/node-publish-secret-name: {{ .Values.persistence.csiSecretName }}
+    csi.storage.k8s.io/node-publish-secret-namespace: {{ .Values.persistence.csiSecretNamespace | default $.Release.Namespace }}
+    {{- end }}
+    {{- with .Values.persistence.annotations }}
+    {{- toYaml . }}
+    {{- end }}
 spec:
   accessModes:
     - {{ .Values.persistence.accessMode }}
