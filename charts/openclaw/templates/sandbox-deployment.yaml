@@ -53,29 +53,27 @@ spec:
             - -c
             - |
               echo "Initializing sandbox for agent {{ .id }}..."
-              # Set dropbear home dir permissions (requires 700)
-              chmod 700 /opt/sandbox 2>/dev/null || mkdir -p /opt/sandbox && chmod 700 /opt/sandbox
-              # Ensure .ssh is a directory (not a file), then copy authorized_keys
-              if [ -f /opt/sandbox/.ssh ]; then rm -f /opt/sandbox/.ssh; fi
-              mkdir -p /opt/sandbox/.ssh
-              chmod 700 /opt/sandbox/.ssh
-              # Remove any existing authorized_keys before copy to ensure clean permissions
-              rm -f /opt/sandbox/.ssh/authorized_keys
-              # Copy and set 0600 explicitly
-              cp /tmp/ssh-auth/authorized_keys /opt/sandbox/.ssh/authorized_keys
-              chmod 600 /opt/sandbox/.ssh/authorized_keys
+              # Create .ssh dir with 0700 on emptyDir volume (takes precedence over Dockerfile layer)
+              mkdir -p /var/run/sandbox/.ssh
+              chmod 700 /var/run/sandbox
+              chmod 700 /var/run/sandbox/.ssh
+              # Copy authorized_keys with 0600
+              rm -f /var/run/sandbox/.ssh/authorized_keys
+              cp /tmp/ssh-auth/authorized_keys /var/run/sandbox/.ssh/authorized_keys
+              chmod 600 /var/run/sandbox/.ssh/authorized_keys
+              chown sandbox:sandbox /var/run/sandbox/.ssh /var/run/sandbox/.ssh/authorized_keys
               echo "Setup complete."
           securityContext:
             runAsUser: 0
             runAsNonRoot: false
           volumeMounts:
-            - name: ssh-auth
-              mountPath: /opt/sandbox
             - name: workspace
               mountPath: /home/sandbox/workspace
             - name: ssh-authorized-keys
               mountPath: /tmp/ssh-auth
               readOnly: true
+            - name: sshd-auth
+              mountPath: /var/run/sandbox/.ssh
       containers:
         - name: sshd
           image: "{{ $root.Values.sandbox.image.repository }}:{{ $root.Values.sandbox.image.tag }}"
@@ -86,7 +84,7 @@ spec:
               protocol: TCP
           env:
             - name: HOME
-              value: /opt/sandbox
+              value: /var/run/sandbox
             {{- range $root.Values.sandbox.env }}
             - name: {{ .name }}
               value: {{ .value | quote }}
@@ -101,18 +99,19 @@ spec:
                 name: {{ .envSecretRef }}
           {{- end }}
           command:
-            - /usr/sbin/dropbear
-            - -F
+            - /usr/sbin/sshd
+            - -D
+            - -e
           securityContext:
             runAsUser: 0
             runAsNonRoot: false
             seccompProfile:
               type: RuntimeDefault
           volumeMounts:
-            - name: ssh-auth
-              mountPath: /opt/sandbox
             - name: workspace
               mountPath: /home/sandbox/workspace
+            - name: sshd-auth
+              mountPath: /var/run/sandbox/.ssh
           resources:
             {{- toYaml $root.Values.sandbox.resources | nindent 12 }}
           {{- if $root.Values.probes.readiness.enabled }}
@@ -150,8 +149,6 @@ spec:
           {{- else }}
           emptyDir: {}
           {{- end }}
-        - name: ssh-auth
-          emptyDir: {}
         - name: ssh-authorized-keys
           configMap:
             name: {{ $root.Values.sandbox.sshAuthorizedKeysConfigMap | default (printf "%s-ssh-authorized-keys" $root.Release.Name) }}
@@ -160,6 +157,8 @@ spec:
             items:
               - key: authorized_keys
                 path: authorized_keys
+        - name: sshd-auth
+          emptyDir: {}
       {{- with $root.Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
