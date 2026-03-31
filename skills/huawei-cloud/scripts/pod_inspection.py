@@ -296,7 +296,8 @@ def biz_pod_monitoring_inspection(region: str, cluster_id: str, aom_instance_id:
         "high_memory_count": 0,
         "high_cpu_pods_top10": [],
         "high_memory_pods_top10": [],
-        "namespaces": all_namespaces or []
+        "namespaces": all_namespaces or [],
+        "monitoring_curves": {}  # 新增：存储监控曲线数据
     }
     
     issues = []
@@ -357,6 +358,13 @@ def biz_pod_monitoring_inspection(region: str, cluster_id: str, aom_instance_id:
                             result["high_cpu_pods_top10"].append(resource_info)
                             add_issue("WARNING", "业务Pod CPU使用率高", pod_name,
                                 f"命名空间: {namespace}, CPU使用率: {round(latest_value, 2)}%")
+                            
+                            # 获取该Pod的CPU时间序列数据
+                            cpu_curve_query = f'sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{{image!="",pod="{pod_name}",namespace="{namespace}"}}[5m])) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="cpu",pod="{pod_name}",namespace="{namespace}"}}) * 100'
+                            cpu_curve_result = get_aom_prom_metrics_http(region, aom_instance_id, cpu_curve_query, hours=1, step=60, ak=ak, sk=sk, project_id=project_id)
+                            if cpu_curve_result.get("success") and cpu_curve_result.get("result", {}).get("data", {}).get("result"):
+                                key = f"cpu_{namespace}_{pod_name}"
+                                result["monitoring_curves"][key] = cpu_curve_result["result"]["data"]["result"][0]
                     except (ValueError, IndexError):
                         pass
     
@@ -372,6 +380,43 @@ def biz_pod_monitoring_inspection(region: str, cluster_id: str, aom_instance_id:
                     result["high_memory_count"] = int(float(values[-1][1]))
                 except (ValueError, IndexError):
                     pass
+    
+    # 内存 Top 10
+    if result["high_memory_count"] > 0:
+        mem_top10_query = 'topk(10, sum by (pod, namespace) (container_memory_working_set_bytes{image!="",namespace!~"kube-system|monitoring"}) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{resource="memory",namespace!~"kube-system|monitoring"}) * 100)'
+        mem_top10_result = get_aom_prom_metrics_http(region, aom_instance_id, mem_top10_query, ak=ak, sk=sk, project_id=project_id)
+        
+        if mem_top10_result.get("success") and mem_top10_result.get("result", {}).get("data", {}).get("result"):
+            for item in mem_top10_result["result"]["data"]["result"]:
+                metric = item.get("metric", {})
+                values = item.get("values", [])
+                if values:
+                    try:
+                        latest_value = float(values[-1][1])
+                        pod_name = metric.get("pod", "unknown")
+                        namespace = metric.get("namespace", "unknown")
+                        
+                        if latest_value > 80:
+                            pod_info = all_pods_map.get(pod_name, {}) if all_pods_map else {}
+                            resource_info = {
+                                "pod": pod_name,
+                                "namespace": namespace,
+                                "memory_usage_percent": round(latest_value, 2),
+                                "node": pod_info.get("node", "Unknown"),
+                                "status": "critical" if latest_value > 90 else "warning"
+                            }
+                            result["high_memory_pods_top10"].append(resource_info)
+                            add_issue("WARNING", "业务Pod内存使用率高", pod_name,
+                                f"命名空间: {namespace}, 内存使用率: {round(latest_value, 2)}%")
+                            
+                            # 获取该Pod的内存时间序列数据
+                            mem_curve_query = f'sum by (pod, namespace) (container_memory_working_set_bytes{{image!="",pod="{pod_name}",namespace="{namespace}"}}) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="memory",pod="{pod_name}",namespace="{namespace}"}}) * 100'
+                            mem_curve_result = get_aom_prom_metrics_http(region, aom_instance_id, mem_curve_query, hours=1, step=60, ak=ak, sk=sk, project_id=project_id)
+                            if mem_curve_result.get("success") and mem_curve_result.get("result", {}).get("data", {}).get("result"):
+                                key = f"memory_{namespace}_{pod_name}"
+                                result["monitoring_curves"][key] = mem_curve_result["result"]["data"]["result"][0]
+                    except (ValueError, IndexError):
+                        pass
     
     # 设置状态
     if result["high_cpu_count"] > 0 or result["high_memory_count"] > 0:

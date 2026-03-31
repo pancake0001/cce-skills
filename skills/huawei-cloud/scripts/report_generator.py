@@ -10,6 +10,8 @@
 """
 
 import time
+import json
+from datetime import datetime, timezone
 from typing import Dict, Any, List
 
 
@@ -104,7 +106,8 @@ def generate_sub_inspection_report(check_name: str, check_data: dict, issues: li
         }
         report["details"] = {
             "high_cpu_pods": check_data.get("high_cpu_pods_top10", []),
-            "high_memory_pods": check_data.get("high_memory_pods_top10", [])
+            "high_memory_pods": check_data.get("high_memory_pods_top10", []),
+            "monitoring_curves": check_data.get("monitoring_curves", {})
         }
         for pod in check_data.get("high_cpu_pods_top10", []):
             report["recommendations"].append({
@@ -122,7 +125,8 @@ def generate_sub_inspection_report(check_name: str, check_data: dict, issues: li
         report["details"] = {
             "high_cpu_nodes": check_data.get("high_cpu_nodes_top10", []),
             "high_memory_nodes": check_data.get("high_memory_nodes_top10", []),
-            "high_disk_nodes": check_data.get("high_disk_nodes_top10", [])
+            "high_disk_nodes": check_data.get("high_disk_nodes_top10", []),
+            "monitoring_curves": check_data.get("monitoring_curves", {})
         }
         for node in check_data.get("high_cpu_nodes_top10", []):
             report["recommendations"].append({
@@ -320,7 +324,33 @@ def generate_detailed_html_report(summary_report: dict) -> str:
         .footer {{ text-align: center; padding: 20px; color: #666; font-size: 14px; }}
         .toggle-icon {{ transition: transform 0.3s; }}
         .toggle-icon.collapsed {{ transform: rotate(-90deg); }}
+        
+        /* 监控图表样式 */
+        .monitoring-charts {{
+            margin-top: 20px;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }}
+        .chart-container {{
+            margin-bottom: 30px;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }}
+        .chart-container h4 {{
+            margin-top: 0;
+            color: #667eea;
+        }}
+        .chart-container canvas {{
+            max-height: 300px;
+            width: 100% !important;
+        }}
     </style>
+    
+    <!-- 引入 Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
     <div class="container">
@@ -416,6 +446,96 @@ def generate_detailed_html_report(summary_report: dict) -> str:
                     <div class="message"><strong>{issue.get('category')}:</strong> {issue.get('item')} - {issue.get('details')}</div>
                 </div>
 """
+        
+        # 监控曲线
+        monitoring_curves = report.get("details", {}).get("monitoring_curves", {}) or report.get("monitoring_curves", {})
+        if monitoring_curves:
+            html += '<div class="monitoring-charts">'
+            html += '<h3 style="margin-top: 0; color: #667eea;">📈 监控曲线</h3>'
+            
+            for curve_key, curve_data in monitoring_curves.items():
+                # 解析曲线key获取资源信息
+                parts = curve_key.split("_")
+                metric_type = parts[0] if parts else "unknown"
+                resource_name = "_".join(parts[1:]) if len(parts) > 1 else "unknown"
+                
+                # 获取时间和值数据
+                metric = curve_data.get("metric", {})
+                values = curve_data.get("values", [])
+                
+                if values:
+                    html += f'<div class="chart-container" id="chart-container-{curve_key}">'
+                    html += f'<h4>{_format_key(metric_type)} - {resource_name}</h4>'
+                    html += f'<canvas id="chart-{curve_key}"></canvas>'
+                    html += '</div>'
+                    
+                    # 准备图表数据
+                    labels = []
+                    data_points = []
+                    for ts, val in values:
+                        try:
+                            dt = datetime.fromtimestamp(int(float(ts)), timezone.utc)
+                            labels.append(dt.strftime('%H:%M:%S'))
+                            data_points.append(round(float(val), 2))
+                        except:
+                            pass
+                    
+                    # 添加图表初始化脚本
+                    html += f"""
+                    <script>
+                    (function() {{
+                        var ctx = document.getElementById('chart-{curve_key}').getContext('2d');
+                        new Chart(ctx, {{
+                            type: 'line',
+                            data: {{
+                                labels: {json.dumps(labels)},
+                                datasets: [{{
+                                    label: '{_format_key(metric_type)} (%)',
+                                    data: {json.dumps(data_points)},
+                                    borderColor: '#667eea',
+                                    backgroundColor: 'rgba(102, 126, 234, 0.1)',
+                                    borderWidth: 2,
+                                    fill: true,
+                                    tension: 0.4,
+                                    pointRadius: 3
+                                }}]
+                            }},
+                            options: {{
+                                responsive: true,
+                                maintainAspectRatio: true,
+                                plugins: {{
+                                    legend: {{
+                                        display: true
+                                    }},
+                                    tooltip: {{
+                                        mode: 'index',
+                                        intersect: false
+                                    }}
+                                }},
+                                scales: {{
+                                    x: {{
+                                        display: true,
+                                        title: {{
+                                            display: true,
+                                            text: '时间'
+                                        }}
+                                    }},
+                                    y: {{
+                                        display: true,
+                                        title: {{
+                                            display: true,
+                                            text: '使用率 (%)'
+                                        }},
+                                        min: 0,
+                                        max: 100
+                                    }}
+                                }}
+                            }}
+                        }});
+                    }})();
+                    </script>
+                    """
+            html += '</div>'
         
         # 建议
         recommendations = report.get("recommendations", [])

@@ -94,10 +94,13 @@ PROJECT_IDS = {
 # ============================================================
 # 安全约束 (Security Constraints)
 # ============================================================
-# 1. 禁止将任何认证信息（AK/SK/Token/Certificate）保存到文件系统
-# 2. 禁止将认证信息保存到长期内存或持久化存储
-# 3. 所有临时证书文件在使用后必须立即删除
-# 4. 不要在日志或响应中泄露敏感信息
+# 1. ❌ 禁止将任何认证信息（AK/SK/Token/Certificate）保存到文件系统
+# 2. ❌ 禁止将AK/SK保存到长期内存、缓存或持久化存储
+# 3. ✅ AK/SK仅在当前请求调用栈中存在，调用结束自动释放
+# 4. ✅ 仅非敏感的项目ID缓存在进程内存中（从不写入磁盘）
+# 5. ✅ 所有临时证书文件在使用后必须立即删除
+# 6. ✅ 禁止在日志、响应或错误信息中泄露AK/SK等敏感信息
+# 7. ✅ 从不向任何第三方服务器发送认证信息
 # ============================================================
 
 # Project ID cache - auto-populated from IAM (只缓存project_id，不缓存密钥)
@@ -2000,6 +2003,87 @@ def list_vpc_networks(region: str, ak: Optional[str] = None, sk: Optional[str] =
         }
 
 
+def list_vpc_subnets(region: str, vpc_id: str = None, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
+    """List VPC subnets in the specified region with pagination
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        vpc_id: Optional VPC ID to filter subnets
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+        limit: Number of results to return (default: 100)
+        offset: Pagination offset (default: 0)
+
+    Returns:
+        Dictionary with subnets list
+    """
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {
+            "success": False,
+            "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+        }
+
+    if not SDK_AVAILABLE:
+        return {
+            "success": False,
+            "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"
+        }
+
+    try:
+        client = create_vpc_client(region, access_key, secret_key, proj_id)
+
+        request = ListSubnetsRequest()
+        request.limit = str(limit)
+        request.offset = str(offset)
+        if vpc_id:
+            request.vpc_id = vpc_id
+
+        response = client.list_subnets(request)
+
+        subnets = []
+        if hasattr(response, 'subnets') and response.subnets:
+            for subnet in response.subnets:
+                subnet_info = {
+                    "id": subnet.id,
+                    "name": subnet.name,
+                    "cidr": subnet.cidr,
+                    "vpc_id": subnet.vpc_id,
+                    "gateway_ip": subnet.gateway_ip,
+                    "dns_list": subnet.dns_list,
+                    "status": subnet.status,
+                    "availability_zone": subnet.availability_zone,
+                    "created_at": str(subnet.created_at) if subnet.created_at else None,
+                }
+                if hasattr(subnet, 'description') and subnet.description:
+                    subnet_info["description"] = subnet.description
+                subnets.append(subnet_info)
+
+        return {
+            "success": True,
+            "region": region,
+            "action": "list_vpc_subnets",
+            "vpc_id": vpc_id or "all",
+            "count": len(subnets),
+            "subnets": subnets
+        }
+
+    except ClientRequestException as e:
+        return {
+            "success": False,
+            "error": f"{e.error_code} - {e.error_msg}",
+            "request_id": getattr(e, 'request_id', None)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
 def list_security_groups(region: str, vpc_id: str = None, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
     """List security groups in the specified region with pagination"""
     access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
@@ -2342,7 +2426,8 @@ def list_cce_cluster_nodes(region: str, cluster_id: str, ak: Optional[str] = Non
                 # Node spec
                 if hasattr(node, 'spec'):
                     node_info["flavor"] = getattr(node.spec, 'flavor', None)
-                    node_info["ip"] = getattr(node.spec, 'server_id', None)
+                    node_info["server_id"] = getattr(node.spec, 'server_id', None)  # ECS服务器ID
+                    node_info["availability_zone"] = getattr(node.spec, 'az', None)  # 可用区
                 # Node conditions
                 if hasattr(node, 'status') and hasattr(node.status, 'conditions'):
                     conditions = []
@@ -2502,12 +2587,84 @@ def list_cce_node_pools(region: str, cluster_id: str, ak: Optional[str] = None, 
         nodepools = []
         if hasattr(response, 'items') and response.items:
             for nodepool in response.items:
+                # Get scale groups (default + extension)
+                scale_groups = []
+                
+                # Add default scale group (from spec.nodeTemplate)
+                if hasattr(nodepool, 'spec'):
+                    default_sg_info = {
+                        "name": "default",
+                        "type": "default",
+                        "initial_node_count": nodepool.spec.initial_node_count if hasattr(nodepool.spec, 'initial_node_count') else None,
+                    }
+                    
+                    # Get info from nodeTemplate
+                    if hasattr(nodepool.spec, 'node_template'):
+                        node_template = nodepool.spec.node_template
+                        default_sg_info["flavor"] = node_template.flavor if hasattr(node_template, 'flavor') else None
+                        default_sg_info["availability_zone"] = node_template.az if hasattr(node_template, 'az') else None
+                        # Add other nodeTemplate fields if available
+                        if hasattr(node_template, 'root_volume'):
+                            default_sg_info["root_volume"] = node_template.root_volume.to_dict() if hasattr(node_template.root_volume, 'to_dict') else str(node_template.root_volume)
+                        if hasattr(node_template, 'data_volumes'):
+                            default_sg_info["data_volumes"] = [dv.to_dict() if hasattr(dv, 'to_dict') else str(dv) for dv in node_template.data_volumes]
+                    
+                    # Get autoscaling info
+                    if hasattr(nodepool.spec, 'autoscaling'):
+                        default_sg_info["autoscaling"] = {
+                            "enable": nodepool.spec.autoscaling.enable if hasattr(nodepool.spec.autoscaling, 'enable') else None,
+                            "min_node_count": nodepool.spec.autoscaling.min_node_count if hasattr(nodepool.spec.autoscaling, 'min_node_count') else None,
+                            "max_node_count": nodepool.spec.autoscaling.max_node_count if hasattr(nodepool.spec.autoscaling, 'max_node_count') else None,
+                            "scale_down_cooldown_time": nodepool.spec.autoscaling.scale_down_cooldown_time if hasattr(nodepool.spec.autoscaling, 'scale_down_cooldown_time') else None,
+                            "priority": nodepool.spec.autoscaling.priority if hasattr(nodepool.spec.autoscaling, 'priority') else None,
+                        }
+                    
+                    scale_groups.append(default_sg_info)
+                
+                # Add extension scale groups
+                if hasattr(nodepool, 'spec') and hasattr(nodepool.spec, 'extension_scale_groups'):
+                    for sg in nodepool.spec.extension_scale_groups:
+                        sg_info = {
+                            "type": "extension",
+                        }
+                        if hasattr(sg, 'metadata'):
+                            sg_info["name"] = sg.metadata.name if hasattr(sg.metadata, 'name') else None
+                            sg_info["uid"] = sg.metadata.uid if hasattr(sg.metadata, 'uid') else None
+                        if hasattr(sg, 'spec'):
+                            sg_spec = sg.spec
+                            sg_info["flavor"] = sg_spec.flavor if hasattr(sg_spec, 'flavor') else None
+                            sg_info["availability_zone"] = sg_spec.az if hasattr(sg_spec, 'az') else None
+                            sg_info["initial_node_count"] = sg_spec.initial_node_count if hasattr(sg_spec, 'initial_node_count') else None
+                            sg_info["min_node_count"] = sg_spec.min_node_count if hasattr(sg_spec, 'min_node_count') else None
+                            sg_info["max_node_count"] = sg_spec.max_node_count if hasattr(sg_spec, 'max_node_count') else None
+                            if hasattr(sg_spec, 'autoscaling'):
+                                sg_info["autoscaling"] = {
+                                    "enable": sg_spec.autoscaling.enable if hasattr(sg_spec.autoscaling, 'enable') else None,
+                                    "extension_priority": sg_spec.autoscaling.extension_priority if hasattr(sg_spec.autoscaling, 'extension_priority') else None,
+                                }
+                        scale_groups.append(sg_info)
+                
+                # Get scale group statuses
+                scale_group_statuses = []
+                if hasattr(nodepool, 'status') and hasattr(nodepool.status, 'scale_group_statuses'):
+                    for sgs in nodepool.status.scale_group_statuses:
+                        sgs_info = {}
+                        if hasattr(sgs, 'name'):
+                            sgs_info["name"] = sgs.name
+                        if hasattr(sgs, 'current_node_count'):
+                            sgs_info["current_node_count"] = sgs.current_node_count
+                        if hasattr(sgs, 'status'):
+                            sgs_info["status"] = sgs.status
+                        scale_group_statuses.append(sgs_info)
+                
                 pool_info = {
                     "id": nodepool.metadata.uid,
                     "name": nodepool.metadata.name,
                     "flavor": nodepool.spec.flavor if hasattr(nodepool, 'spec') and hasattr(nodepool.spec, 'flavor') else None,
                     "initial_node_count": nodepool.spec.initial_node_count if hasattr(nodepool, 'spec') and hasattr(nodepool.spec, 'initial_node_count') else None,
                     "autoscaling_enabled": nodepool.spec.autoscaling.enabled if hasattr(nodepool, 'spec') and hasattr(nodepool.spec, 'autoscaling') and hasattr(nodepool.spec.autoscaling, 'enabled') else False,
+                    "scale_groups": scale_groups,  # 详细的伸缩组信息
+                    "scale_group_statuses": scale_group_statuses,  # 伸缩组状态
                     "created_at": str(nodepool.metadata.creation_timestamp) if hasattr(nodepool, 'metadata') and hasattr(nodepool.metadata, 'creation_timestamp') else None,
                 }
                 nodepools.append(pool_info)
@@ -2913,7 +3070,7 @@ def list_aom_instances(region: str, ak: Optional[str] = None, sk: Optional[str] 
         }
 
 
-def resize_node_pool(region: str, cluster_id: str, nodepool_id: str, node_count: int, confirm: bool = False, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+def resize_node_pool(region: str, cluster_id: str, nodepool_id: str, node_count: int, confirm: bool = False, scale_group_names: Optional[List[str]] = None, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
     """Resize (scale up or down) a CCE node pool to the specified number of nodes
 
     ⚠️ 二次确认机制：
@@ -2926,6 +3083,7 @@ def resize_node_pool(region: str, cluster_id: str, nodepool_id: str, node_count:
         nodepool_id: Node pool ID to resize
         node_count: Target node count (desired number of nodes)
         confirm: True to confirm and execute (default: False)
+        scale_group_names: List of scale group names to use (default: ["default"])
         ak: Access Key ID (optional)
         sk: Secret Access Key (optional)
         project_id: Project ID (optional)
@@ -2961,17 +3119,19 @@ def resize_node_pool(region: str, cluster_id: str, nodepool_id: str, node_count:
 
     # ========== 二次确认机制 ==========
     if not confirm:
+        sg_note = f" (using scale groups: {', '.join(scale_group_names)})" if scale_group_names else ""
         return {
             "success": False,
             "requires_confirmation": True,
             "operation": "resize_nodepool",
-            "warning": f"⚠️ 危险操作：即将调整节点池 '{nodepool_id}' 的节点数为 {node_count}",
+            "warning": f"⚠️ 危险操作：即将调整节点池 '{nodepool_id}' 的节点数为 {node_count}{sg_note}",
             "cluster_id": cluster_id,
             "nodepool_id": nodepool_id,
             "target_node_count": node_count,
+            "scale_group_names": scale_group_names,
             "hint": "确认操作请添加 confirm=true 参数",
             "note": "⚠️ 此操作会影响集群资源和计费！",
-            "example": f"resize_node_pool region={region} cluster_id={cluster_id} nodepool_id={nodepool_id} node_count={node_count} confirm=true"
+            "example": f"resize_node_pool region={region} cluster_id={cluster_id} nodepool_id={nodepool_id} node_count={node_count} scale_group_names={','.join(scale_group_names)} confirm=true" if scale_group_names else f"resize_node_pool region={region} cluster_id={cluster_id} nodepool_id={nodepool_id} node_count={node_count} confirm=true"
         }
 
     if not SDK_AVAILABLE:
@@ -2981,35 +3141,68 @@ def resize_node_pool(region: str, cluster_id: str, nodepool_id: str, node_count:
         }
 
     try:
+        # For testing, try both nodepool name and uid
+        # First, get the nodepool details to get both name and uid
+        nodepool_result = list_cce_node_pools(region, cluster_id, ak, sk, project_id)
+        if not nodepool_result.get("success"):
+            return nodepool_result
+        
+        # Find the target nodepool and get both name and uid
+        target_nodepool = None
+        nodepool_name = None
+        nodepool_uid = None
+        for np in nodepool_result.get("nodepools", []):
+            np_id = np.get("id")
+            np_name = np.get("name")
+            if (np_id and np_id.strip() == nodepool_id.strip()) or (np_name and np_name.strip() == nodepool_id.strip()):
+                target_nodepool = np
+                nodepool_name = np_name
+                nodepool_uid = np_id
+                break
+        if not target_nodepool:
+            return {
+                "success": False,
+                "error": f"Node pool {nodepool_id} not found in cluster {cluster_id}"
+            }
+        
+        # Use specified scale group names, default to ["default"]
+        if not scale_group_names:
+            scale_group_names = ["default"]
+
         client = create_cce_client(region, access_key, secret_key, proj_id)
 
         # Build the scale request using ScaleNodePool API
+        # First try with nodepool_uid, then with nodepool_name
         request = ScaleNodePoolRequest()
         request.cluster_id = cluster_id
-        request.nodepool_id = nodepool_id
-
+        request.nodepool_id = nodepool_uid
+        
         # Create the scale body - using correct format from API
         scale_body = ScaleNodePoolRequestBody()
         scale_body.node_num = node_count
         scale_body.kind = 'NodePool'
         scale_body.api_version = 'v3'
-
+        
         # Create spec with scale_groups
         spec = ScaleNodePoolSpec()
         spec.desired_node_count = node_count
-
-        # NOTE: The scale_group name is specific to each nodepool
-        # This is a known limitation - the API requires the scale group name
-        # For nodepool test-cce-ai-diagnose-nodepool-43986, the scale group is 'mc9xlarge2-cnnorth4g-76473y'
-        # In production, this should be retrieved from the nodepool details dynamically
-        spec.scale_groups = ['mc9xlarge2-cnnorth4g-76473y']
-
+        
+        # Use dynamically retrieved scale_group_names
+        spec.scale_groups = scale_group_names
+        
         scale_body.spec = spec
-
         request.body = scale_body
-
-        # Execute the scale operation
-        response = client.scale_node_pool(request)
+        
+        # First try with nodepool_uid
+        try:
+            response = client.scale_node_pool(request)
+        except ClientRequestException as e:
+            # If failed with uid, try with name
+            if "Nodepool not found" in str(e) or "Invalid nodepool uuid" in str(e):
+                request.nodepool_id = nodepool_name
+                response = client.scale_node_pool(request)
+            else:
+                raise
 
         return {
             "success": True,
@@ -3018,6 +3211,7 @@ def resize_node_pool(region: str, cluster_id: str, nodepool_id: str, node_count:
             "nodepool_id": nodepool_id,
             "action": "resize_node_pool",
             "target_node_count": node_count,
+            "scale_group_names_used": scale_group_names,
             "message": f"Node pool resize request submitted successfully",
             "response": response.to_dict() if hasattr(response, 'to_dict') else str(response)
         }
@@ -7791,7 +7985,8 @@ def get_cce_pod_metrics(region: str, cluster_id: str, ak: Optional[str] = None, 
                         "pod": metric.get("pod", "unknown"),
                         "namespace": metric.get("namespace", "unknown"),
                         "cpu_usage_percent": round(latest_value, 2),
-                        "status": "critical" if latest_value > 80 else "warning" if latest_value > 50 else "normal"
+                        "status": "critical" if latest_value > 80 else "warning" if latest_value > 50 else "normal",
+                        "time_series": values  # 保存完整的时序数据
                     })
                 except (ValueError, IndexError):
                     pass
@@ -7808,7 +8003,8 @@ def get_cce_pod_metrics(region: str, cluster_id: str, ak: Optional[str] = None, 
                         "pod": metric.get("pod", "unknown"),
                         "namespace": metric.get("namespace", "unknown"),
                         "memory_usage_percent": round(latest_value, 2),
-                        "status": "critical" if latest_value > 80 else "warning" if latest_value > 50 else "normal"
+                        "status": "critical" if latest_value > 80 else "warning" if latest_value > 50 else "normal",
+                        "time_series": values  # 保存完整的时序数据
                     })
                 except (ValueError, IndexError):
                     pass
@@ -8015,7 +8211,8 @@ def get_cce_node_metrics(region: str, cluster_id: str, ak: Optional[str] = None,
                             "node_id": node_info.get("id", ""),
                             "flavor": node_info.get("flavor", ""),
                             metric_name: round(latest_value, 2),
-                            "status": "critical" if latest_value > 80 else "warning" if latest_value > 50 else "normal"
+                            "status": "critical" if latest_value > 80 else "warning" if latest_value > 50 else "normal",
+                            "time_series": values  # 保存完整的时序数据
                         })
                     except (ValueError, IndexError):
                         pass
@@ -8281,61 +8478,6 @@ def list_aom_alarm_rules(region: str, ak: Optional[str] = None, sk: Optional[str
             "alarm_rules": rules,
             "service_discovery_count": len(discoveries),
             "service_discovery_rules": discoveries
-        }
-        
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e),
-            "error_type": type(e).__name__
-        }
-
-
-def list_aom_service_discovery(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
-    """List AOM service discovery rules
-    
-    Args:
-        region: Huawei Cloud region (e.g., cn-north-4)
-        ak: Access Key ID (optional)
-        sk: Secret Access Key (optional)
-        project_id: Project ID (optional)
-    
-    Returns:
-        Dict with success status and list of service discovery rules
-    """
-    if not SDK_AVAILABLE:
-        return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
-    
-    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
-    if not access_key or not secret_key:
-        return {"success": False, "error": "Credentials not provided"}
-    
-    try:
-        from huaweicloudsdkaom.v2 import ListServiceDiscoveryRulesRequest
-        
-        client = create_aom_client(region, access_key, secret_key, proj_id)
-        
-        request = ListServiceDiscoveryRulesRequest()
-        
-        response = client.list_service_discovery_rules(request)
-        
-        discoveries = []
-        if hasattr(response, 'service_discovery_rules') and response.service_discovery_rules:
-            for sd in response.service_discovery_rules:
-                sd_info = {
-                    "id": getattr(sd, 'service_discovery_id', None),
-                    "name": getattr(sd, 'service_discovery_name', None),
-                    "status": getattr(sd, 'status', None),
-                    "type": getattr(sd, 'service_discovery_type', None),
-                }
-                discoveries.append(sd_info)
-        
-        return {
-            "success": True,
-            "region": region,
-            "action": "list_aom_service_discovery",
-            "count": len(discoveries),
-            "service_discoveries": discoveries
         }
         
     except Exception as e:
@@ -8741,6 +8883,31 @@ def main():
             sys.exit(1)
         result = list_vpc_networks(region, ak, sk, project_id, limit, offset)
 
+    elif action == "huawei_list_vpc_subnets":
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        vpc_id = params.get("vpc_id")
+        result = list_vpc_subnets(region, vpc_id, ak, sk, project_id, limit, offset)
+
+    elif action == "huawei_list_sfs":
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        result = list_sfs(region, ak, sk, project_id, limit, offset)
+
+    elif action == "huawei_list_sfs_turbo":
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        result = list_sfs_turbo(region, ak, sk, project_id, limit, offset)
+
+    elif action == "huawei_list_nat":
+        if not region:
+            print(json.dumps({"success": False, "error": "region is required"}))
+            sys.exit(1)
+        result = list_nat_gateways(region, ak, sk, project_id, limit, offset)
+
     elif action == "huawei_list_security_groups":
         if not region:
             print(json.dumps({"success": False, "error": "region is required"}))
@@ -8794,6 +8961,22 @@ def main():
             print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
             sys.exit(1)
         result = list_cce_addons(region, cluster_id, ak, sk, project_id)
+
+    elif action == "huawei_list_cce_configmaps":
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        namespace = params.get("namespace")
+        include_data = params.get("include_data", "false").lower() == "true"
+        result = list_cce_configmaps(region, cluster_id, namespace, limit, include_data, ak, sk, project_id)
+
+    elif action == "huawei_list_cce_secrets":
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        namespace = params.get("namespace")
+        include_data = params.get("include_data", "false").lower() == "true"
+        result = list_cce_secrets(region, cluster_id, namespace, limit, include_data, ak, sk, project_id)
 
     elif action == "huawei_get_cce_kubeconfig":
         if not region or not cluster_id:
@@ -8869,17 +9052,6 @@ def main():
             sys.exit(1)
         from subagent_dispatcher import generate_auto_subagent_info
         result = generate_auto_subagent_info(region, cluster_id, ak, sk, project_id)
-
-    elif action == "huawei_cce_cluster_inspection_subagent_legacy":
-        # Subagent模式(旧版) - 返回任务列表供主agent启动多个subagent
-        if not region:
-            print(json.dumps({"success": False, "error": "region is required"}))
-            sys.exit(1)
-        if not cluster_id:
-            print(json.dumps({"success": False, "error": "cluster_id is required"}))
-            sys.exit(1)
-        from subagent_dispatcher import generate_subagent_task_list
-        result = generate_subagent_task_list(region, cluster_id, ak, sk, project_id)
 
     elif action == "huawei_aggregate_inspection_results":
         # 聚合subagent结果
@@ -9033,7 +9205,12 @@ def main():
             print(json.dumps({"success": False, "error": "node_count must be an integer"}))
             sys.exit(1)
         confirm_resize = params.get("confirm", "false").lower() == "true"
-        result = resize_node_pool(region, cluster_id, nodepool_id, node_count, confirm_resize, ak, sk, project_id)
+        # Parse scale_group_names (comma-separated)
+        scale_group_names_str = params.get("scale_group_names")
+        scale_group_names = None
+        if scale_group_names_str:
+            scale_group_names = [name.strip() for name in scale_group_names_str.split(",") if name.strip()]
+        result = resize_node_pool(region, cluster_id, nodepool_id, node_count, confirm_resize, scale_group_names, ak, sk, project_id)
 
     elif action == "huawei_list_evs":
         if not region:
@@ -9057,13 +9234,13 @@ def main():
         if not region or not cluster_id:
             print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
             sys.exit(1)
-        result = get_cce_cluster_namespaces(region, cluster_id, ak, sk, project_id)
+        result = get_kubernetes_namespaces(region, cluster_id, ak, sk, project_id)
 
     elif action == "huawei_get_cce_deployments":
         if not region or not cluster_id:
             print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
             sys.exit(1)
-        result = get_cce_cluster_deployments(region, cluster_id, ak, sk, project_id, namespace)
+        result = get_kubernetes_deployments(region, cluster_id, ak, sk, project_id, namespace)
 
     elif action == "huawei_scale_cce_workload":
         if not region or not cluster_id:
@@ -9110,19 +9287,19 @@ def main():
         if not region or not cluster_id:
             print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
             sys.exit(1)
-        result = get_cce_cluster_events(region, cluster_id, ak, sk, project_id, namespace, limit)
+        result = get_kubernetes_events(region, cluster_id, ak, sk, project_id, namespace, limit)
 
     elif action == "huawei_get_cce_pvcs":
         if not region or not cluster_id:
             print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
             sys.exit(1)
-        result = get_cce_cluster_pvcs(region, cluster_id, ak, sk, project_id, namespace)
+        result = get_kubernetes_pvcs(region, cluster_id, ak, sk, project_id, namespace)
 
     elif action == "huawei_get_cce_pvs":
         if not region or not cluster_id:
             print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
             sys.exit(1)
-        result = get_cce_cluster_pvs(region, cluster_id, ak, sk, project_id)
+        result = get_kubernetes_pvs(region, cluster_id, ak, sk, project_id)
 
     elif action == "huawei_get_cce_services":
         if not region or not cluster_id:
@@ -9201,12 +9378,6 @@ def main():
             sys.exit(1)
         result = list_aom_alarm_rules(region, ak, sk, project_id, limit, offset)
 
-    elif action == "huawei_list_aom_service_discovery":
-        if not region:
-            print(json.dumps({"success": False, "error": "region is required"}))
-            sys.exit(1)
-        result = list_aom_service_discovery(region, ak, sk, project_id)
-
     elif action == "huawei_list_aom_action_rules":
         if not region:
             print(json.dumps({"success": False, "error": "region is required"}))
@@ -9229,6 +9400,225 @@ def main():
         result = list_aom_current_alarms(region, ak, sk, project_id, event_type, event_severity, time_range, limit)
 
     # ========== LTS 日志服务工具 ==========
+    elif action == "huawei_get_application_log_stream":
+        # 根据namespace和应用名获取对应的日志组和日志流
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        namespace = params.get("namespace", "default")
+        app_name = params.get("app_name")
+        if not app_name:
+            print(json.dumps({"success": False, "error": "app_name is required"}))
+            sys.exit(1)
+        
+        temp_files = []
+        try:
+            # 步骤1: 获取 LogConfig
+            logconfig_list = []
+            found_match = False
+            matched_logconfig = None
+            default_logconfig = None
+            
+            if K8S_AVAILABLE and SDK_AVAILABLE:
+                try:
+                    # 获取集群证书
+                    cce_client = create_cce_client(region, ak, sk, project_id)
+                    cert_request = CreateKubernetesClusterCertRequest()
+                    cert_request.cluster_id = cluster_id
+                    body = ClusterCertDuration()
+                    body.duration = 1
+                    cert_request.body = body
+                    cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
+                    kubeconfig_data = cert_response.to_dict()
+                    
+                    # 查找外部集群端点
+                    external_cluster = None
+                    for c in kubeconfig_data.get('clusters', []):
+                        if 'external' in c.get('name', '') and 'TLS' not in c.get('name', ''):
+                            external_cluster = c
+                            break
+                    if not external_cluster:
+                        external_cluster = kubeconfig_data.get('clusters', [{}])[0]
+                    
+                    if external_cluster:
+                        # 配置Kubernetes客户端
+                        configuration = k8s_client.Configuration()
+                        configuration.host = external_cluster.get('cluster', {}).get('server')
+                        configuration.verify_ssl = False
+                        
+                        # 写入证书
+                        user_data = None
+                        for u in kubeconfig_data.get('users', []):
+                            if u.get('name') == 'user':
+                                user_data = u.get('user', {})
+                                break
+                        
+                        cert_file = None
+                        key_file = None
+                        if user_data and user_data.get('client_certificate_data'):
+                            cert_file = '/tmp/cce_applog_client.crt'
+                            with open(cert_file, 'wb') as f:
+                                f.write(base64.b64decode(user_data['client_certificate_data']))
+                            configuration.cert_file = cert_file
+                            temp_files.append(cert_file)
+                        
+                        if user_data and user_data.get('client_key_data'):
+                            key_file = '/tmp/cce_applog_client.key'
+                            with open(key_file, 'wb') as f:
+                                f.write(base64.b64decode(user_data['client_key_data']))
+                            configuration.key_file = key_file
+                            temp_files.append(key_file)
+                        
+                        _register_cert_file(cert_file)
+                        _register_cert_file(key_file)
+                        
+                        # 设置默认配置并获取 LogConfig
+                        k8s_client.Configuration.set_default(configuration)
+                        custom_api = k8s_client.CustomObjectsApi()
+                        
+                        cr_combinations = [("logging.openvessel.io", "v1", "logconfigs")]
+                        
+                        for group, version, plural in cr_combinations:
+                            try:
+                                api_result = custom_api.list_cluster_custom_object(
+                                    group=group, version=version, plural=plural
+                                )
+                                
+                                if api_result and 'items' in api_result:
+                                    for item in api_result['items']:
+                                        lc_name = item.get('metadata', {}).get('name')
+                                        lc_namespace = item.get('metadata', {}).get('namespace')
+                                        lc_spec = item.get('spec', {})
+                                        
+                                        logconfig_list.append({
+                                            "name": lc_name,
+                                            "namespace": lc_namespace,
+                                            "spec": lc_spec
+                                        })
+                                        
+                                        # 查找匹配的 LogConfig
+                                        output_detail = lc_spec.get("outputDetail", {})
+                                        lts_output = output_detail.get("LTS", {})
+                                        
+                                        # 优先找精确匹配：namespace 和 应用名都匹配
+                                        input_detail = lc_spec.get("inputDetail", {})
+                                        if input_detail.get("type") == "container_stdout":
+                                            stdout_conf = input_detail.get("containerStdout", {})
+                                            if stdout_conf:
+                                                workloads = stdout_conf.get("workloads", [])
+                                                for wl in workloads:
+                                                    if (wl.get("namespace") == namespace and 
+                                                        wl.get("name") == app_name):
+                                                        matched_logconfig = {
+                                                            "name": lc_name,
+                                                            "namespace": lc_namespace,
+                                                            "spec": lc_spec,
+                                                            "lts_group_id": lts_output.get("ltsGroupID"),
+                                                            "lts_stream_id": lts_output.get("ltsStreamID"),
+                                                            "lts_stream_name": lts_output.get("ltsStreamName"),
+                                                            "match_type": "exact"
+                                                        }
+                                                        found_match = True
+                                                        break
+                                        
+                                        # 找默认的 default-stdout
+                                        if lc_name == "default-stdout":
+                                            default_logconfig = {
+                                                "name": lc_name,
+                                                "namespace": lc_namespace,
+                                                "spec": lc_spec,
+                                                "lts_group_id": lts_output.get("ltsGroupID"),
+                                                "lts_stream_id": lts_output.get("ltsStreamID"),
+                                                "lts_stream_name": lts_output.get("ltsStreamName")
+                                            }
+                                    
+                                    if matched_logconfig:
+                                        break
+                            except Exception:
+                                continue
+                
+                except Exception:
+                    pass
+            
+            # 步骤2: 获取日志组和日志流详情
+            from lts_tools import list_log_groups, list_log_streams
+            
+            lts_groups_result = list_log_groups(region, ak, sk, project_id)
+            group_map = {}
+            
+            if lts_groups_result.get("success"):
+                for group in lts_groups_result.get("log_groups", []):
+                    group_map[group.get("log_group_id")] = group
+            
+            # 步骤3: 决定使用哪个 LogConfig
+            final_logconfig = None
+            use_default = False
+            
+            if found_match and matched_logconfig:
+                final_logconfig = matched_logconfig
+            elif default_logconfig:
+                final_logconfig = default_logconfig
+                use_default = True
+            
+            # 步骤4: 获取对应的日志流详细信息
+            log_group_info = None
+            log_stream_info = None
+            
+            if final_logconfig:
+                target_group_id = final_logconfig.get("lts_group_id")
+                target_stream_id = final_logconfig.get("lts_stream_id")
+                
+                if target_group_id and target_group_id in group_map:
+                    log_group_info = group_map[target_group_id]
+                    
+                    # 获取该日志组下的所有日志流
+                    streams_result = list_log_streams(region, target_group_id, ak, sk, project_id)
+                    if streams_result.get("success"):
+                        for stream in streams_result.get("log_streams", []):
+                            if stream.get("log_stream_id") == target_stream_id:
+                                log_stream_info = stream
+                                break
+            
+            # 清理临时文件
+            for f in temp_files:
+                try:
+                    os.unlink(f)
+                except:
+                    pass
+            
+            # 构建结果
+            result = {
+                "success": True,
+                "cluster_id": cluster_id,
+                "query_namespace": namespace,
+                "query_app_name": app_name,
+                "found_match": found_match,
+                "used_default": use_default,
+                "matched_logconfig": matched_logconfig,
+                "default_logconfig": default_logconfig,
+                "final_logconfig": final_logconfig,
+                "log_group": log_group_info,
+                "log_stream": log_stream_info,
+                "all_logconfigs": logconfig_list,
+                "note": "找到匹配的应用日志配置" if found_match else ("使用默认日志流配置" if use_default else "未找到匹配的配置")
+            }
+            
+            if not final_logconfig:
+                result["success"] = False
+                result["error"] = "未找到匹配的LogConfig，也没有default-stdout"
+        
+        except Exception as e:
+            for f in temp_files:
+                try:
+                    os.unlink(f)
+                except:
+                    pass
+            result = {
+                "success": False,
+                "error": str(e),
+                "error_type": type(e).__name__
+            }
+
     elif action == "huawei_list_log_groups":
         # 查询日志组列表
         if not region:
@@ -9247,7 +9637,7 @@ def main():
         result = list_log_streams(region, log_group_id, ak, sk, project_id)
 
     elif action == "huawei_query_logs":
-        # 查询日志内容
+        # 查询日志内容（支持分页）
         if not region:
             print(json.dumps({"success": False, "error": "region is required"}))
             sys.exit(1)
@@ -9259,29 +9649,156 @@ def main():
         start_time = params.get("start_time")
         end_time = params.get("end_time")
         keywords = params.get("keywords")
-        query_limit = int(params.get("limit", 100))
-        from lts_tools import query_logs_by_keywords
-        result = query_logs_by_keywords(region, log_group_id, log_stream_id, keywords, start_time, end_time, query_limit, ak, sk, project_id)
+        query_limit = int(params.get("limit", 1000))
+        scroll_id = params.get("scroll_id")
+        is_desc = params.get("is_desc", "true").lower() == "true"
+        is_iterative = params.get("is_iterative", "false").lower() == "true"
+        from lts_tools import query_logs
+        result = query_logs(region, log_group_id, log_stream_id, 
+                           start_time, end_time, keywords, query_limit,
+                           scroll_id, is_desc, is_iterative,
+                           ak, sk, project_id)
 
-    elif action == "huawei_query_cce_logs":
-        # 查询CCE集群日志
+
+
+    elif action == "huawei_get_cce_logconfigs":
+        # 获取CCE集群的LogConfig自定义资源
         if not region or not cluster_id:
             print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
             sys.exit(1)
-        start_time = params.get("start_time")
-        end_time = params.get("end_time")
-        keywords = params.get("keywords")
-        query_limit = int(params.get("limit", 100))
-        from lts_tools import query_cce_cluster_logs
-        result = query_cce_cluster_logs(region, cluster_id, start_time, end_time, keywords, query_limit, ak, sk, project_id)
+        namespace = params.get("namespace")
+        
+        if not K8S_AVAILABLE:
+            result = {"success": False, "error": f"Kubernetes SDK not installed: {K8S_IMPORT_ERROR}"}
+        elif not SDK_AVAILABLE:
+            result = {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+        else:
+            temp_files = []
+            try:
+                # 获取集群证书
+                cce_client = create_cce_client(region, ak, sk, project_id)
+                cert_request = CreateKubernetesClusterCertRequest()
+                cert_request.cluster_id = cluster_id
+                body = ClusterCertDuration()
+                body.duration = 1
+                cert_request.body = body
+                cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
+                kubeconfig_data = cert_response.to_dict()
+                
+                # 查找外部集群端点
+                external_cluster = None
+                for c in kubeconfig_data.get('clusters', []):
+                    if 'external' in c.get('name', '') and 'TLS' not in c.get('name', ''):
+                        external_cluster = c
+                        break
+                if not external_cluster:
+                    external_cluster = kubeconfig_data.get('clusters', [{}])[0]
+                if not external_cluster:
+                    result = {"success": False, "error": "Could not find cluster endpoint"}
+                else:
+                    # 配置Kubernetes客户端
+                    configuration = k8s_client.Configuration()
+                    configuration.host = external_cluster.get('cluster', {}).get('server')
+                    configuration.verify_ssl = False
+                    
+                    # 写入证书
+                    user_data = None
+                    for u in kubeconfig_data.get('users', []):
+                        if u.get('name') == 'user':
+                            user_data = u.get('user', {})
+                            break
+                    
+                    if user_data and user_data.get('client_certificate_data'):
+                        cert_file = '/tmp/cce_logconfig_client.crt'
+                        with open(cert_file, 'wb') as f:
+                            f.write(base64.b64decode(user_data['client_certificate_data']))
+                        configuration.cert_file = cert_file
+                        temp_files.append(cert_file)
+                    
+                    if user_data and user_data.get('client_key_data'):
+                        key_file = '/tmp/cce_logconfig_client.key'
+                        with open(key_file, 'wb') as f:
+                            f.write(base64.b64decode(user_data['client_key_data']))
+                        configuration.key_file = key_file
+                        temp_files.append(key_file)
+                    
+                    _register_cert_file(cert_file if 'cert_file' in locals() else None)
+                    _register_cert_file(key_file if 'key_file' in locals() else None)
+                    
+                    # 设置默认配置并获取自定义资源
+                    k8s_client.Configuration.set_default(configuration)
+                    custom_api = k8s_client.CustomObjectsApi()
+                    
+                    # 尝试常见的 LogConfig Group/Version/Plural 组合
+                    logconfig_list = []
+                    tried_combinations = []
+                    cr_combinations = [
+                        # 用户提供的正确组合
+                        ("logging.openvessel.io", "v1", "logconfigs"),
+                        # 其他常见组合
+                        ("lts.opentelekomcloud.com", "v1", "logconfigs"),
+                        ("lts.huaweicloud.com", "v1", "logconfigs"),
+                        ("lts.io", "v1", "logconfigs"),
+                        ("logging.huaweicloud.com", "v1", "logconfigs"),
+                        ("lts.opentelekomcloud.com", "v1alpha1", "logconfigs"),
+                        ("lts.opentelekomcloud.com", "v1beta1", "logconfigs"),
+                    ]
+                    
+                    for group, version, plural in cr_combinations:
+                        tried_combinations.append(f"{group}/{version}/{plural}")
+                        try:
+                            if namespace:
+                                api_result = custom_api.list_namespaced_custom_object(
+                                    group=group, version=version, namespace=namespace, plural=plural
+                                )
+                            else:
+                                api_result = custom_api.list_cluster_custom_object(
+                                    group=group, version=version, plural=plural
+                                )
+                            
+                            if api_result and 'items' in api_result:
+                                for item in api_result['items']:
+                                    lc_info = {
+                                        "name": item.get('metadata', {}).get('name'),
+                                        "namespace": item.get('metadata', {}).get('namespace'),
+                                        "creation_time": str(item.get('metadata', {}).get('creationTimestamp')),
+                                        "spec": item.get('spec', {}),
+                                        "status": item.get('status', {}),
+                                        "api_version": f"{group}/{version}"
+                                    }
+                                    logconfig_list.append(lc_info)
+                                if logconfig_list:
+                                    break
+                        except Exception:
+                            continue
+                    
+                    # 清理临时文件
+                    for f in temp_files:
+                        try:
+                            os.unlink(f)
+                        except:
+                            pass
+                    
+                    result = {
+                        "success": True,
+                        "cluster_id": cluster_id,
+                        "namespace": namespace or "all",
+                        "count": len(logconfig_list),
+                        "tried_api_combinations": tried_combinations,
+                        "logconfigs": logconfig_list,
+                        "note": "如果没有找到LogConfig，说明集群可能没有安装相关CRD，或者使用了不同的API版本"
+                    }
+            
+            except Exception as e:
+                # 清理临时文件
+                for f in temp_files:
+                    try:
+                        os.unlink(f)
+                    except:
+                        pass
+                result = {"success": False, "error": str(e), "error_type": type(e).__name__}
 
-    elif action == "huawei_find_cce_log_streams":
-        # 查找CCE集群相关的日志流
-        if not region or not cluster_id:
-            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
-            sys.exit(1)
-        from lts_tools import find_cce_log_streams
-        result = find_cce_log_streams(region, cluster_id, ak, sk, project_id)
+
 
     elif action == "huawei_query_aom_logs":
         # 查询AOM应用日志
@@ -9309,7 +9826,7 @@ def main():
             print(json.dumps({"success": False, "error": "log_group_id and log_stream_id are required"}))
             sys.exit(1)
         hours = int(params.get("hours", 1))
-        query_limit = int(params.get("limit", 100))
+        query_limit = int(params.get("limit", 1000))
         from lts_tools import get_recent_logs
         result = get_recent_logs(region, log_group_id, log_stream_id, hours, query_limit, ak, sk, project_id)
 
@@ -9322,6 +9839,720 @@ def main():
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
+def list_cce_configmaps(region: str, cluster_id: str, namespace: Optional[str] = None, limit: int = 100, offset: int = 0, include_data: bool = False, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+    """List ConfigMaps in a CCE cluster
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        cluster_id: CCE cluster ID
+        namespace: Kubernetes namespace (optional, default: all namespaces)
+        limit: Number of results to return (default: 100)
+        offset: Pagination offset (default: 0)
+        include_data: Whether to include ConfigMap data content (default: False, only return keys)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+
+    Returns:
+        Dictionary with configmaps list
+    """
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {
+            "success": False,
+            "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+        }
+
+    if not cluster_id:
+        return {
+            "success": False,
+            "error": "cluster_id is required"
+        }
+
+    try:
+        # Get cluster credentials
+        cce_client = create_cce_client(region, access_key, secret_key, proj_id)
+
+        cert_request = CreateKubernetesClusterCertRequest()
+        cert_request.cluster_id = cluster_id
+        body = ClusterCertDuration()
+        body.duration = 1
+        cert_request.body = body
+
+        cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
+        kubeconfig_data = cert_response.to_dict()
+
+        # Find external cluster endpoint
+        external_cluster = None
+        for c in kubeconfig_data.get('clusters', []):
+            if 'external' in c.get('name', '') and 'TLS' not in c.get('name', ''):
+                external_cluster = c
+                break
+
+        if not external_cluster:
+            external_cluster = kubeconfig_data.get('clusters', [{}])[0]
+
+        if not external_cluster:
+            return {
+                "success": False,
+                "error": "Could not find cluster endpoint"
+            }
+
+        # Configure Kubernetes client
+        configuration = k8s_client.Configuration()
+        configuration.host = external_cluster.get('cluster', {}).get('server')
+        configuration.verify_ssl = False
+
+        # Write certificates
+        user_data = None
+        for u in kubeconfig_data.get('users', []):
+            if u.get('name') == 'user':
+                user_data = u.get('user', {})
+                break
+
+        if user_data and user_data.get('client_certificate_data'):
+            cert_file = '/tmp/cce_configmaps_client.crt'
+            with open(cert_file, 'wb') as f:
+                f.write(base64.b64decode(user_data['client_certificate_data']))
+            configuration.cert_file = cert_file
+
+        if user_data and user_data.get('client_key_data'):
+            key_file = '/tmp/cce_configmaps_client.key'
+            with open(key_file, 'wb') as f:
+                f.write(base64.b64decode(user_data['client_key_data']))
+            configuration.key_file = key_file
+
+        # 注册临时证书文件以便后续清理
+        _register_cert_file(cert_file)
+        _register_cert_file(key_file)
+
+        # Set default configuration
+        k8s_client.Configuration.set_default(configuration)
+
+        # List configmaps
+        core_v1 = k8s_client.CoreV1Api()
+        if namespace:
+            configmaps = core_v1.list_namespaced_config_map(namespace, limit=limit)
+        else:
+            configmaps = core_v1.list_config_map_for_all_namespaces(limit=limit)
+
+        configmap_list = []
+        for cm in configmaps.items:
+            cm_info = {
+                "name": cm.metadata.name,
+                "namespace": cm.metadata.namespace,
+                "created": str(cm.metadata.creation_timestamp) if cm.metadata.creation_timestamp else None,
+                "labels": cm.metadata.labels,
+                "annotations": cm.metadata.annotations,
+                "data_keys": list(cm.data.keys()) if cm.data else []
+            }
+            if include_data and cm.data:
+                cm_info["data"] = cm.data
+            configmap_list.append(cm_info)
+
+        # 清理临时证书文件
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
+        return {
+            "success": True,
+            "region": region,
+            "cluster_id": cluster_id,
+            "action": "list_cce_configmaps",
+            "namespace": namespace or "all",
+            "count": len(configmap_list),
+            "configmaps": configmap_list
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
+def list_cce_secrets(region: str, cluster_id: str, namespace: Optional[str] = None, limit: int = 100, include_data: bool = False, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+    """List Secrets in a CCE Kubernetes cluster
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        cluster_id: CCE cluster ID
+        namespace: Kubernetes namespace (optional, default: all namespaces)
+        limit: Number of results to return (default: 100)
+        include_data: Whether to include Secret data content (default: False, only return keys)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+
+    Returns:
+        Dictionary with secrets list
+    """
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {
+            "success": False,
+            "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+        }
+
+    if not cluster_id:
+        return {
+            "success": False,
+            "error": "cluster_id is required"
+        }
+
+    try:
+        # Get cluster credentials
+        cce_client = create_cce_client(region, access_key, secret_key, proj_id)
+
+        cert_request = CreateKubernetesClusterCertRequest()
+        cert_request.cluster_id = cluster_id
+        body = ClusterCertDuration()
+        body.duration = 1
+        cert_request.body = body
+
+        cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
+        kubeconfig_data = cert_response.to_dict()
+
+        # Find external cluster endpoint
+        external_cluster = None
+        for c in kubeconfig_data.get('clusters', []):
+            if 'external' in c.get('name', '') and 'TLS' not in c.get('name', ''):
+                external_cluster = c
+                break
+
+        if not external_cluster:
+            external_cluster = kubeconfig_data.get('clusters', [{}])[0]
+
+        if not external_cluster:
+            return {
+                "success": False,
+                "error": "Could not find cluster endpoint"
+            }
+
+        # Configure Kubernetes client
+        configuration = k8s_client.Configuration()
+        configuration.host = external_cluster.get('cluster', {}).get('server')
+        configuration.verify_ssl = False
+
+        # Write certificates
+        user_data = None
+        for u in kubeconfig_data.get('users', []):
+            if u.get('name') == 'user':
+                user_data = u.get('user', {})
+                break
+
+        if user_data and user_data.get('client_certificate_data'):
+            cert_file = '/tmp/cce_secrets_client.crt'
+            with open(cert_file, 'wb') as f:
+                f.write(base64.b64decode(user_data['client_certificate_data']))
+            configuration.cert_file = cert_file
+
+        if user_data and user_data.get('client_key_data'):
+            key_file = '/tmp/cce_secrets_client.key'
+            with open(key_file, 'wb') as f:
+                f.write(base64.b64decode(user_data['client_key_data']))
+            configuration.key_file = key_file
+
+        # 注册临时证书文件以便后续清理
+        _register_cert_file(cert_file)
+        _register_cert_file(key_file)
+
+        # Set default configuration
+        k8s_client.Configuration.set_default(configuration)
+
+        # List secrets
+        core_v1 = k8s_client.CoreV1Api()
+        if namespace:
+            secrets = core_v1.list_namespaced_secret(namespace, limit=limit)
+        else:
+            secrets = core_v1.list_secret_for_all_namespaces(limit=limit)
+
+        secret_list = []
+        for secret in secrets.items:
+            secret_info = {
+                "name": secret.metadata.name,
+                "namespace": secret.metadata.namespace,
+                "type": secret.type,
+                "created": str(secret.metadata.creation_timestamp) if secret.metadata.creation_timestamp else None,
+                "labels": secret.metadata.labels,
+                "annotations": secret.metadata.annotations,
+                "data_keys": list(secret.data.keys()) if secret.data else []
+            }
+            if include_data and secret.data:
+                secret_info["data"] = secret.data
+            secret_list.append(secret_info)
+
+        # 清理临时证书文件
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
+        return {
+            "success": True,
+            "region": region,
+            "cluster_id": cluster_id,
+            "action": "list_cce_secrets",
+            "namespace": namespace or "all",
+            "count": len(secret_list),
+            "secrets": secret_list
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
+def list_sfs_turbo(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
+    """List SFS Turbo file systems in the specified region
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+        limit: Number of results to return (default: 100)
+        offset: Pagination offset (default: 0)
+
+    Returns:
+        Dictionary with SFS Turbo file systems list
+    """
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {
+            "success": False,
+            "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+        }
+
+    if not SDK_AVAILABLE:
+        return {
+            "success": False,
+            "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"
+        }
+
+    try:
+        # 基于官方SDK实现：https://github.com/huaweicloud/huaweicloud-sdk-python-v3/tree/master/huaweicloud-sdk-sfsturbo
+        from huaweicloudsdksfsturbo.v1 import SFSTurboClient
+        from huaweicloudsdksfsturbo.v1.model.list_shares_request import ListSharesRequest
+        from huaweicloudsdksfsturbo.v1.region.sfsturbo_region import SFSTurboRegion
+
+        # 初始化SFS Turbo客户端（注意SDK中类名是全大写的SFSTurboClient和SFSTurboRegion）
+        client = SFSTurboClient.new_builder() \
+            .with_credentials(BasicCredentials(access_key, secret_key, proj_id)) \
+            .with_region(SFSTurboRegion.value_of(region)) \
+            .build()
+
+        # 构造请求
+        request = ListSharesRequest()
+        request.limit = limit
+        request.offset = offset
+
+        # 发送请求
+        response = client.list_shares(request)
+
+        # 处理响应
+        turbos = []
+        if hasattr(response, 'shares') and response.shares:
+            for turbo in response.shares:
+                turbo_info = {
+                    "id": getattr(turbo, 'id', None),
+                    "name": getattr(turbo, 'name', None),
+                    "status": getattr(turbo, 'status', None),
+                    "size": getattr(turbo, 'size', None),  # 总容量(GB)
+                    "used_size": getattr(turbo, 'used_size', None),  # 已用容量(GB)
+                    "share_proto": getattr(turbo, 'share_proto', None),  # 协议：NFS/CIFS
+                    "share_type": getattr(turbo, 'share_type', None),  # 类型：STANDARD(标准型)/PERFORMANCE(性能型)
+                    "availability_zone": getattr(turbo, 'availability_zone', None),
+                    "vpc_id": getattr(turbo, 'vpc_id', None),
+                    "subnet_id": getattr(turbo, 'subnet_id', None),
+                    "security_group_id": getattr(turbo, 'security_group_id', None),
+                    "export_location": getattr(turbo, 'export_location', None),  # 挂载地址
+                    "created_at": str(getattr(turbo, 'created_at', None)) if getattr(turbo, 'created_at', None) else None,
+                    "description": getattr(turbo, 'description', None)
+                }
+                turbos.append(turbo_info)
+
+        return {
+            "success": True,
+            "region": region,
+            "action": "list_sfs_turbo",
+            "count": len(turbos),
+            "sfsturbos": turbos
+        }
+
+    except ImportError as e:
+        return {
+            "success": False,
+            "error": f"SFS Turbo SDK import error: {str(e)}",
+            "hint": "请从GitHub源码安装：\n"
+                    "git clone https://github.com/huaweicloud/huaweicloud-sdk-python-v3.git\n"
+                    "cd huaweicloud-sdk-python-v3/huaweicloud-sdk-sfsturbo\n"
+                    "pip3 install ."
+        }
+    except ClientRequestException as e:
+        return {
+            "success": False,
+            "error": f"{e.error_code} - {e.error_msg}",
+            "request_id": getattr(e, 'request_id', None)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
+def list_sfs(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
+    """List SFS (Scalable File Service) file systems in the specified region
+    基于官方API实现：OpenStack Manila API (v2)
+    使用HTTP直接调用，AK/SK签名参考huawei_get_aom_metrics
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+        limit: Number of results to return (default: 100)
+        offset: Pagination offset (default: 0)
+
+    Returns:
+        Dictionary with SFS file systems list
+    """
+    import hashlib
+    import hmac
+    import time as time_module
+    import urllib.parse
+    from urllib.parse import quote, unquote
+    import requests
+    
+    # 获取凭证（包括project_id）
+    access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
+
+    if not access_key or not secret_key or not proj_id:
+        return {
+            "success": False,
+            "error": "Credentials and project_id are required"
+        }
+
+    try:
+        now = int(time_module.time())
+        
+        # ========== 构建URL和查询参数 ==========
+        base_url = f"https://sfs.{region}.myhuaweicloud.com"
+        resource_path = f"/v2/{proj_id}/shares"
+        
+        # 查询参数
+        query_params = [
+            ('limit', str(limit)),
+            ('offset', str(offset))
+        ]
+        
+        # ========== 按SDK方式构建签名 ==========
+        timestamp = time_module.strftime('%Y%m%dT%H%M%SZ', time_module.gmtime(now))
+        
+        # 1. HTTP方法
+        http_method = 'GET'
+        
+        # 2. Canonical URI
+        def url_encode(s):
+            return quote(s, safe='~')
+        
+        pattens = unquote(resource_path).split('/')
+        uri_parts = []
+        for v in pattens:
+            uri_parts.append(url_encode(v))
+        canonical_uri = "/".join(uri_parts)
+        if canonical_uri[-1] != '/':
+            canonical_uri = canonical_uri + "/"
+        
+        # 3. Canonical Query String (排序)
+        sorted_params = sorted(query_params, key=lambda x: x[0])
+        canonical_querystring = '&'.join(['{}={}'.format(url_encode(k), url_encode(str(v))) for k, v in sorted_params])
+        
+        # 4. Headers
+        host_header = f"sfs.{region}.myhuaweicloud.com"
+        
+        # 签名的headers（按字母顺序）
+        signed_headers_list = ['host', 'x-project-id', 'x-sdk-date']
+        signed_headers = ';'.join(signed_headers_list)
+        
+        # Canonical headers (每个header一行，最后有\n)
+        canonical_headers = 'host:{}\nx-project-id:{}\nx-sdk-date:{}\n'.format(
+            host_header, proj_id, timestamp)
+        
+        # 5. 空body的hash
+        hashed_body = hashlib.sha256(b'').hexdigest()
+        
+        # 6. 构建Canonical Request
+        canonical_request = '{}\n{}\n{}\n{}\n{}\n{}'.format(
+            http_method, canonical_uri, canonical_querystring,
+            canonical_headers, signed_headers, hashed_body)
+        
+        # 7. StringToSign (SDK格式：只有3行)
+        algorithm = 'SDK-HMAC-SHA256'
+        hashed_canonical_request = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
+        string_to_sign = '{}\n{}\n{}'.format(algorithm, timestamp, hashed_canonical_request)
+        
+        # 8. 签名 - 使用hex编码
+        signature = hmac.new(
+            secret_key.encode('utf-8'),
+            string_to_sign.encode('utf-8'),
+            hashlib.sha256
+        ).digest().hex()
+        
+        # 9. Authorization
+        authorization = '{} Access={}, SignedHeaders={}, Signature={}'.format(
+            algorithm, access_key, signed_headers, signature)
+        
+        # 10. 构建请求URL
+        url_query_string = '&'.join(['{}={}'.format(k, urllib.parse.quote(str(v))) for k, v in query_params])
+        url = "{}{}?{}".format(base_url, resource_path, url_query_string)
+        
+        # 11. 请求headers
+        headers = {
+            'Host': host_header,
+            'X-Project-Id': proj_id,
+            'X-Sdk-Date': timestamp,
+            'Authorization': authorization,
+        }
+        
+        # 发送请求
+        resp = requests.get(url, headers=headers, verify=False, timeout=30)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            sfs_list = []
+            if "shares" in data:
+                for sfs in data["shares"]:
+                    sfs_info = {
+                        "id": sfs.get("id"),
+                        "name": sfs.get("name"),
+                        "status": sfs.get("status"),
+                        "size": sfs.get("size"),  # 总容量(GB)
+                        "used_size": sfs.get("used_size"),  # 已用容量(GB)
+                        "share_proto": sfs.get("share_proto"),  # 协议类型：NFS/CIFS
+                        "availability_zone": sfs.get("availability_zone"),
+                        "vpc_id": sfs.get("vpc_id"),
+                        "export_location": sfs.get("export_location"),  # 挂载地址
+                        "created_at": sfs.get("created_at"),
+                        "description": sfs.get("description"),
+                        "is_public": sfs.get("is_public"),
+                        "share_type": sfs.get("share_type")  # 文件系统类型
+                    }
+                    sfs_list.append(sfs_info)
+            
+            return {
+                "success": True,
+                "region": region,
+                "action": "list_sfs",
+                "count": len(sfs_list),
+                "sfs": sfs_list
+            }
+        else:
+            return {
+                "success": False,
+                "error": f"HTTP {resp.status_code}: {resp.text[:500]}",
+                "url": url,
+                "request_headers": {k: v for k, v in headers.items() if k != 'Authorization'}
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
+def list_nat_gateways(region: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, limit: int = 100, offset: int = 0, id: str = None, name: str = None, description: str = None, spec: str = None, router_id: str = None, internal_network_id: str = None, status: str = None, admin_state_up: bool = None, created_at: str = None) -> Dict[str, Any]:
+    """List NAT gateways in the specified region
+    基于官方API实现：https://support.huaweicloud.com/api-natgateway/nat_api_0002.html
+    使用HTTP直接调用，AK/SK签名参考huawei_get_aom_metrics
+    
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        ak: Access Key ID (optional if HUAWEI_AK env is set)
+        sk: Secret Access Key (optional if HUAWEI_SK env is set)
+        project_id: Project ID (optional if HUAWEI_PROJECT_ID env is set)
+        limit: Number of results to return (default: 100)
+        offset: Offset for pagination (default: 0)
+        id: NAT gateway ID (optional filter)
+        name: NAT gateway name (optional filter)
+        description: NAT gateway description (optional filter)
+        spec: NAT gateway specification (optional filter: 1=small, 2=medium, 3=large, 4=extra-large)
+        router_id: Router ID (optional filter)
+        internal_network_id: Internal network ID (optional filter)
+        status: NAT gateway status (optional filter)
+        admin_state_up: Admin state up (optional filter)
+        created_at: Creation time (optional filter)
+
+    Returns:
+        Dictionary with NAT gateways list
+    """
+    import hashlib
+    import hmac
+    import time as time_module
+    import urllib.parse
+    from urllib.parse import quote, unquote
+    import requests
+    
+    # 获取凭证（包括project_id）
+    access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
+
+    if not access_key or not secret_key or not proj_id:
+        return {
+            "success": False,
+            "error": "Credentials and project_id are required"
+        }
+
+    try:
+        now = int(time_module.time())
+        
+        # ========== 构建URL和查询参数 ==========
+        base_url = f"https://nat.{region}.myhuaweicloud.com"
+        resource_path = f"/v2.0/nat_gateways"
+        
+        # 查询参数
+        query_params = []
+        if limit:
+            query_params.append(('limit', str(limit)))
+        if offset:
+            query_params.append(('offset', str(offset)))
+        if id:
+            query_params.append(('id', id))
+        if name:
+            query_params.append(('name', name))
+        if description:
+            query_params.append(('description', description))
+        if spec:
+            query_params.append(('spec', spec))
+        if router_id:
+            query_params.append(('router_id', router_id))
+        if internal_network_id:
+            query_params.append(('internal_network_id', internal_network_id))
+        if status:
+            query_params.append(('status', status))
+        if admin_state_up is not None:
+            query_params.append(('admin_state_up', str(admin_state_up).lower()))
+        if created_at:
+            query_params.append(('created_at', created_at))
+        
+        # ========== 按SDK方式构建签名 ==========
+        timestamp = time_module.strftime('%Y%m%dT%H%M%SZ', time_module.gmtime(now))
+        
+        # 1. HTTP方法
+        http_method = 'GET'
+        
+        # 2. Canonical URI
+        def url_encode(s):
+            return quote(s, safe='~')
+        
+        pattens = unquote(resource_path).split('/')
+        uri_parts = []
+        for v in pattens:
+            uri_parts.append(url_encode(v))
+        canonical_uri = "/".join(uri_parts)
+        if canonical_uri[-1] != '/':
+            canonical_uri = canonical_uri + "/"
+        
+        # 3. Canonical Query String (排序)
+        sorted_params = sorted(query_params, key=lambda x: x[0])
+        canonical_querystring = '&'.join(['{}={}'.format(url_encode(k), url_encode(str(v))) for k, v in sorted_params])
+        
+        # 4. Headers
+        host_header = f"nat.{region}.myhuaweicloud.com"
+        
+        # 签名的headers（按字母顺序）
+        signed_headers_list = ['host', 'x-project-id', 'x-sdk-date']
+        signed_headers = ';'.join(signed_headers_list)
+        
+        # Canonical headers (每个header一行，最后有\n)
+        canonical_headers = 'host:{}\nx-project-id:{}\nx-sdk-date:{}\n'.format(
+            host_header, proj_id, timestamp)
+        
+        # 5. 空body的hash
+        hashed_body = hashlib.sha256(b'').hexdigest()
+        
+        # 6. 构建Canonical Request
+        canonical_request = '{}\n{}\n{}\n{}\n{}\n{}'.format(
+            http_method, canonical_uri, canonical_querystring,
+            canonical_headers, signed_headers, hashed_body)
+        
+        # 7. StringToSign (SDK格式：只有3行)
+        algorithm = 'SDK-HMAC-SHA256'
+        hashed_canonical_request = hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()
+        string_to_sign = '{}\n{}\n{}'.format(algorithm, timestamp, hashed_canonical_request)
+        
+        # 8. 签名 - 使用hex编码
+        signature = hmac.new(
+            secret_key.encode('utf-8'),
+            string_to_sign.encode('utf-8'),
+            hashlib.sha256
+        ).digest().hex()
+        
+        # 9. Authorization
+        authorization = '{} Access={}, SignedHeaders={}, Signature={}'.format(
+            algorithm, access_key, signed_headers, signature)
+        
+        # 10. 构建请求URL
+        url_query_string = '&'.join(['{}={}'.format(k, urllib.parse.quote(str(v))) for k, v in query_params]) if query_params else ""
+        url = "{}{}".format(base_url, resource_path)
+        if url_query_string:
+            url += "?{}".format(url_query_string)
+        
+        # 11. 请求headers
+        headers = {
+            'Host': host_header,
+            'X-Project-Id': proj_id,
+            'X-Sdk-Date': timestamp,
+            'Authorization': authorization,
+        }
+        
+        # 发送请求
+        resp = requests.get(url, headers=headers, verify=False, timeout=30)
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            nat_list = []
+            if "nat_gateways" in data:
+                for nat in data["nat_gateways"]:
+                    nat_info = {
+                        "id": nat.get("id"),
+                        "tenant_id": nat.get("tenant_id"),
+                        "name": nat.get("name"),
+                        "description": nat.get("description"),
+                        "spec": nat.get("spec"),
+                        "router_id": nat.get("router_id"),
+                        "internal_network_id": nat.get("internal_network_id"),
+                        "status": nat.get("status"),
+                        "admin_state_up": nat.get("admin_state_up"),
+                        "created_at": nat.get("created_at"),
+                    }
+                    nat_list.append(nat_info)
+            
+            return {
+                "success": True,
+                "region": region,
+                "action": "list_nat_gateways",
+                "count": len(nat_list),
+                "nat_gateways": nat_list
+            }
+        else:
+            return {
+                "success": False,
+                "error": f"HTTP {resp.status_code}: {resp.text[:500]}",
+                "url": url,
+                "request_headers": {k: v for k, v in headers.items() if k != 'Authorization'}
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
 
 
 if __name__ == "__main__":

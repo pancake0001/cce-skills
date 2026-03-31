@@ -34,6 +34,7 @@ huawei_cloud = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(huawei_cloud)
 
 get_project_id_for_region = huawei_cloud.get_project_id_for_region
+get_credentials = huawei_cloud.get_credentials
 
 
 # LTS 服务端点 (按区域)
@@ -104,6 +105,11 @@ def list_log_groups(region: str, ak: str = None, sk: str = None,
         日志组列表
     """
     try:
+        # Get credentials from environment variables if not provided
+        ak, sk, project_id = get_credentials(ak, sk, project_id)
+        if not ak or not sk:
+            return {"success": False, "error": "Credentials not provided"}
+        
         client = get_lts_client(region, ak, sk, project_id)
         
         request = ListLogGroupsRequest()
@@ -155,6 +161,11 @@ def list_log_streams(region: str, log_group_id: str = None, ak: str = None,
         日志流列表
     """
     try:
+        # Get credentials from environment variables if not provided
+        ak, sk, project_id = get_credentials(ak, sk, project_id)
+        if not ak or not sk:
+            return {"success": False, "error": "Credentials not provided"}
+        
         client = get_lts_client(region, ak, sk, project_id)
         
         request = ListLogStreamsRequest()
@@ -195,7 +206,9 @@ def list_log_streams(region: str, log_group_id: str = None, ak: str = None,
 
 def query_logs(region: str, log_group_id: str, log_stream_id: str,
                start_time: str = None, end_time: str = None,
-               keywords: str = None, limit: int = 100,
+               keywords: str = None, limit: int = 1000,
+               scroll_id: str = None, is_desc: bool = True,
+               is_iterative: bool = False,
                ak: str = None, sk: str = None, 
                project_id: str = None) -> Dict[str, Any]:
     """
@@ -209,6 +222,9 @@ def query_logs(region: str, log_group_id: str, log_stream_id: str,
         end_time: 结束时间 (格式: YYYY-MM-DD HH:MM:SS)
         keywords: 搜索关键词
         limit: 返回条数
+        scroll_id: 滚动查询ID（用于分页下一页）
+        is_desc: 是否降序（从新到旧，默认True）
+        is_iterative: 是否迭代查询
         ak: Access Key
         sk: Secret Key
         project_id: 项目ID
@@ -217,6 +233,11 @@ def query_logs(region: str, log_group_id: str, log_stream_id: str,
         日志内容
     """
     try:
+        # Get credentials from environment variables if not provided
+        ak, sk, project_id = get_credentials(ak, sk, project_id)
+        if not ak or not sk:
+            return {"success": False, "error": "Credentials not provided"}
+        
         client = get_lts_client(region, ak, sk, project_id)
         
         # 处理时间参数
@@ -237,21 +258,31 @@ def query_logs(region: str, log_group_id: str, log_stream_id: str,
             end_ts = int(datetime.now().timestamp() * 1000)
         
         # 构建查询请求
-        from huaweicloudsdklts.v2 import ListLogsRequest, ListLogsRequestBody
+        from huaweicloudsdklts.v2 import ListLogsRequest, QueryLtsLogParams
         
-        body = ListLogsRequestBody(
-            log_group_id=log_group_id,
-            log_stream_id=log_stream_id,
+        # 构建查询参数
+        query_params = QueryLtsLogParams(
             start_time=start_ts,
             end_time=end_ts,
-            limit=limit
+            limit=limit,
+            is_desc=is_desc
         )
         
         if keywords:
-            body.query = keywords
+            query_params.keywords = keywords
         
-        request = ListLogsRequest()
-        request.body = body
+        if scroll_id:
+            query_params.scroll_id = scroll_id
+        
+        if is_iterative:
+            query_params.is_iterative = is_iterative
+        
+        # 构建请求
+        request = ListLogsRequest(
+            log_group_id=log_group_id,
+            log_stream_id=log_stream_id,
+            body=query_params
+        )
         
         response = client.list_logs(request)
         
@@ -265,6 +296,11 @@ def query_logs(region: str, log_group_id: str, log_stream_id: str,
                     "log_stream_id": log_stream_id
                 })
         
+        # 获取滚动ID用于分页
+        next_scroll_id = None
+        if hasattr(response, 'scroll_id') and response.scroll_id:
+            next_scroll_id = response.scroll_id
+        
         return {
             "success": True,
             "log_group_id": log_group_id,
@@ -272,6 +308,8 @@ def query_logs(region: str, log_group_id: str, log_stream_id: str,
             "start_time": start_ts,
             "end_time": end_ts,
             "total": len(logs),
+            "scroll_id": next_scroll_id,
+            "has_more": next_scroll_id is not None,
             "logs": logs
         }
         
@@ -303,86 +341,368 @@ def query_logs_by_keywords(region: str, log_group_id: str, log_stream_id: str,
 
 # ========== CCE集群日志 ==========
 
-def find_cce_log_streams(region: str, cluster_id: str, ak: str = None, 
-                         sk: str = None, project_id: str = None) -> Dict[str, Any]:
+def get_cce_logconfigs(region: str, cluster_id: str, ak: str = None,
+                       sk: str = None, project_id: str = None,
+                       namespace: str = None) -> Dict[str, Any]:
     """
-    查找CCE集群相关的日志流
+    从CCE集群获取 LogConfig 自定义资源（CR）
+    
+    LogConfig 是华为云 CCE 中定义应用与 LTS 日志流关联关系的自定义资源
     """
-    groups_result = list_log_groups(region, ak, sk, project_id)
-    if not groups_result.get("success"):
-        return groups_result
+    import sys
+    import os
+    import base64
+    import tempfile
     
-    matched_streams = []
+    # 检查必要的SDK是否可用
+    SDK_AVAILABLE = True
+    K8S_AVAILABLE = True
+    IMPORT_ERROR = None
+    K8S_IMPORT_ERROR = None
     
-    for group in groups_result.get("log_groups", []):
-        group_id = group.get("log_group_id")
-        group_name = group.get("log_group_name", "")
-        
-        # 查找包含集群ID或CCE相关名称的日志组
-        if cluster_id in group_name or "CCE" in group_name.upper() or "cce" in group_name:
-            streams_result = list_log_streams(region, group_id, ak, sk, project_id)
-            if streams_result.get("success"):
-                for stream in streams_result.get("log_streams", []):
-                    stream["log_group_name"] = group_name
-                    matched_streams.append(stream)
-    
-    return {
-        "success": True,
-        "cluster_id": cluster_id,
-        "total": len(matched_streams),
-        "log_streams": matched_streams
-    }
-
-
-def query_cce_cluster_logs(region: str, cluster_id: str, 
-                           start_time: str = None, end_time: str = None,
-                           keywords: str = None, limit: int = 100,
-                           ak: str = None, sk: str = None,
-                           project_id: str = None) -> Dict[str, Any]:
-    """
-    查询CCE集群日志
-    """
-    streams_result = find_cce_log_streams(region, cluster_id, ak, sk, project_id)
-    if not streams_result.get("success"):
-        return streams_result
-    
-    log_streams = streams_result.get("log_streams", [])
-    if not log_streams:
+    try:
+        from huaweicloudsdkcore.auth.credentials import BasicCredentials
+        from huaweicloudsdkcore.client import Client
+        from huaweicloudsdkcore.exceptions.exceptions import ClientRequestException
+        from huaweicloudsdkcce.v3 import CceClient
+        from huaweicloudsdkcce.v3.region.cce_region import CceRegion
+        from huaweicloudsdkcce.v3.model.create_kubernetes_cluster_cert_request import CreateKubernetesClusterCertRequest
+        from huaweicloudsdkcce.v3.model.cluster_cert_duration import ClusterCertDuration
+    except ImportError as e:
+        SDK_AVAILABLE = False
+        IMPORT_ERROR = str(e)
         return {
             "success": False,
-            "error": f"No log streams found for cluster {cluster_id}",
-            "cluster_id": cluster_id
+            "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"
         }
     
-    all_logs = []
+    try:
+        import kubernetes
+        from kubernetes import client
+    except ImportError as e:
+        K8S_AVAILABLE = False
+        K8S_IMPORT_ERROR = str(e)
+        return {
+            "success": False,
+            "error": f"Kubernetes SDK not installed: {K8S_IMPORT_ERROR}"
+        }
     
-    for stream in log_streams[:3]:
-        group_id = stream.get("log_group_id")
-        stream_id = stream.get("log_stream_id")
-        
-        logs_result = query_logs(
-            region, group_id, stream_id,
-            start_time, end_time, keywords, limit,
-            ak, sk, project_id
-        )
-        
-        if logs_result.get("success"):
-            for log in logs_result.get("logs", []):
-                log["log_group_id"] = group_id
-                log["log_stream_id"] = stream_id
-                log["log_stream_name"] = stream.get("log_stream_name")
-                all_logs.append(log)
-        
-        if len(all_logs) >= limit:
-            break
+    # 使用本地的 get_credentials
+    ak, sk, project_id = get_credentials(ak, sk, project_id)
+    if not ak or not sk:
+        return {"success": False, "error": "Credentials not provided"}
     
-    return {
-        "success": True,
-        "cluster_id": cluster_id,
-        "total": len(all_logs[:limit]),
-        "logs": all_logs[:limit],
-        "searched_streams": len(log_streams)
-    }
+    # 创建自己的 CCE 客户端
+    def _create_cce_client(region_name, access_key, secret_key, proj_id):
+        credentials = BasicCredentials(access_key, secret_key)
+        client = CceClient.new_builder() \
+            .with_credentials(credentials) \
+            .with_region(getattr(CceRegion, region_name.upper().replace("-", "_"))) \
+            .build()
+        return client
+    
+    temp_files = []
+    
+    try:
+        # 获取集群证书
+        cce_client = _create_cce_client(region, ak, sk, project_id)
+        
+        cert_request = CreateKubernetesClusterCertRequest()
+        cert_request.cluster_id = cluster_id
+        body = ClusterCertDuration()
+        body.duration = 1
+        cert_request.body = body
+        
+        cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
+        kubeconfig_data = cert_response.to_dict()
+        
+        # 查找外部集群端点
+        external_cluster = None
+        for c in kubeconfig_data.get('clusters', []):
+            if 'external' in c.get('name', '') and 'TLS' not in c.get('name', ''):
+                external_cluster = c
+                break
+        
+        if not external_cluster:
+            external_cluster = kubeconfig_data.get('clusters', [{}])[0]
+        
+        if not external_cluster:
+            return {
+                "success": False,
+                "error": "Could not find cluster endpoint"
+            }
+        
+        # 配置Kubernetes客户端
+        configuration = kubernetes.client.Configuration()
+        configuration.host = external_cluster.get('cluster', {}).get('server')
+        configuration.verify_ssl = False
+        
+        # 写入证书
+        user_data = None
+        for u in kubeconfig_data.get('users', []):
+            if u.get('name') == 'user':
+                user_data = u.get('user', {})
+                break
+        
+        cert_file = None
+        key_file = None
+        
+        if user_data and user_data.get('client_certificate_data'):
+            cert_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.crt', delete=False)
+            cert_file.write(base64.b64decode(user_data['client_certificate_data']))
+            cert_file.close()
+            configuration.cert_file = cert_file.name
+            temp_files.append(cert_file.name)
+        
+        if user_data and user_data.get('client_key_data'):
+            key_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.key', delete=False)
+            key_file.write(base64.b64decode(user_data['client_key_data']))
+            key_file.close()
+            configuration.key_file = key_file.name
+            temp_files.append(key_file.name)
+        
+        # 设置默认配置并获取自定义资源
+        kubernetes.client.Configuration.set_default(configuration)
+        custom_api = kubernetes.client.CustomObjectsApi()
+        
+        # 尝试常见的 LogConfig Group/Version/Plural 组合
+        logconfig_list = []
+        tried_combinations = []
+        
+        # 常见的 LogConfig CR 定义
+        cr_combinations = [
+            # 华为云常见的 CRD
+            ("lts.opentelekomcloud.com", "v1", "logconfigs"),
+            ("lts.huaweicloud.com", "v1", "logconfigs"),
+            ("lts.io", "v1", "logconfigs"),
+            ("logging.huaweicloud.com", "v1", "logconfigs"),
+            # 也尝试不带版本的
+            ("lts.opentelekomcloud.com", "v1alpha1", "logconfigs"),
+            ("lts.opentelekomcloud.com", "v1beta1", "logconfigs"),
+        ]
+        
+        for group, version, plural in cr_combinations:
+            tried_combinations.append(f"{group}/{version}/{plural}")
+            try:
+                if namespace:
+                    result = custom_api.list_namespaced_custom_object(
+                        group=group,
+                        version=version,
+                        namespace=namespace,
+                        plural=plural
+                    )
+                else:
+                    result = custom_api.list_cluster_custom_object(
+                        group=group,
+                        version=version,
+                        plural=plural
+                    )
+                
+                if result and 'items' in result:
+                    for item in result['items']:
+                        lc_info = {
+                            "name": item.get('metadata', {}).get('name'),
+                            "namespace": item.get('metadata', {}).get('namespace'),
+                            "creation_time": str(item.get('metadata', {}).get('creationTimestamp')),
+                            "spec": item.get('spec', {}),
+                            "status": item.get('status', {}),
+                            "api_version": f"{group}/{version}"
+                        }
+                        logconfig_list.append(lc_info)
+                    
+                    if logconfig_list:
+                        # 找到 LogConfig，跳出循环
+                        break
+            except Exception as e:
+                # 这个组合不存在，继续尝试下一个
+                continue
+        
+        # 清理临时文件
+        for f in temp_files:
+            try:
+                os.unlink(f)
+            except:
+                pass
+        
+        return {
+            "success": True,
+            "cluster_id": cluster_id,
+            "namespace": namespace or "all",
+            "count": len(logconfig_list),
+            "tried_api_combinations": tried_combinations,
+            "logconfigs": logconfig_list,
+            "note": "如果没有找到LogConfig，说明集群可能没有安装相关CRD，或者使用了不同的API版本"
+        }
+        
+    except Exception as e:
+        # 清理临时文件
+        for f in temp_files:
+            try:
+                os.unlink(f)
+            except:
+                pass
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+    
+    # 获取凭证
+    ak, sk, project_id = get_credentials(ak, sk, project_id)
+    if not ak or not sk:
+        return {"success": False, "error": "Credentials not provided"}
+    
+    if not K8S_AVAILABLE:
+        return {"success": False, "error": f"Kubernetes SDK not installed: {K8S_IMPORT_ERROR}"}
+    
+    if not SDK_AVAILABLE:
+        return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+    
+    temp_files = []
+    
+    try:
+        # 获取集群证书
+        cce_client = create_cce_client(region, ak, sk, project_id)
+        
+        cert_request = CreateKubernetesClusterCertRequest()
+        cert_request.cluster_id = cluster_id
+        body = ClusterCertDuration()
+        body.duration = 1
+        cert_request.body = body
+        
+        cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
+        kubeconfig_data = cert_response.to_dict()
+        
+        # 查找外部集群端点
+        external_cluster = None
+        for c in kubeconfig_data.get('clusters', []):
+            if 'external' in c.get('name', '') and 'TLS' not in c.get('name', ''):
+                external_cluster = c
+                break
+        
+        if not external_cluster:
+            external_cluster = kubeconfig_data.get('clusters', [{}])[0]
+        
+        if not external_cluster:
+            return {
+                "success": False,
+                "error": "Could not find cluster endpoint"
+            }
+        
+        # 配置Kubernetes客户端
+        configuration = kubernetes.client.Configuration()
+        configuration.host = external_cluster.get('cluster', {}).get('server')
+        configuration.verify_ssl = False
+        
+        # 写入证书
+        user_data = None
+        for u in kubeconfig_data.get('users', []):
+            if u.get('name') == 'user':
+                user_data = u.get('user', {})
+                break
+        
+        cert_file = None
+        key_file = None
+        
+        if user_data and user_data.get('client_certificate_data'):
+            cert_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.crt', delete=False)
+            cert_file.write(base64.b64decode(user_data['client_certificate_data']))
+            cert_file.close()
+            configuration.cert_file = cert_file.name
+            temp_files.append(cert_file.name)
+        
+        if user_data and user_data.get('client_key_data'):
+            key_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.key', delete=False)
+            key_file.write(base64.b64decode(user_data['client_key_data']))
+            key_file.close()
+            configuration.key_file = key_file.name
+            temp_files.append(key_file.name)
+        
+        # 设置默认配置并获取自定义资源
+        kubernetes.client.Configuration.set_default(configuration)
+        custom_api = kubernetes.client.CustomObjectsApi()
+        
+        # 尝试常见的 LogConfig Group/Version/Plural 组合
+        logconfig_list = []
+        tried_combinations = []
+        
+        # 常见的 LogConfig CR 定义
+        cr_combinations = [
+            # 华为云常见的 CRD
+            ("lts.opentelekomcloud.com", "v1", "logconfigs"),
+            ("lts.huaweicloud.com", "v1", "logconfigs"),
+            ("lts.io", "v1", "logconfigs"),
+            ("logging.huaweicloud.com", "v1", "logconfigs"),
+            # 也尝试不带版本的
+            ("lts.opentelekomcloud.com", "v1alpha1", "logconfigs"),
+            ("lts.opentelekomcloud.com", "v1beta1", "logconfigs"),
+        ]
+        
+        for group, version, plural in cr_combinations:
+            tried_combinations.append(f"{group}/{version}/{plural}")
+            try:
+                if namespace:
+                    result = custom_api.list_namespaced_custom_object(
+                        group=group,
+                        version=version,
+                        namespace=namespace,
+                        plural=plural
+                    )
+                else:
+                    result = custom_api.list_cluster_custom_object(
+                        group=group,
+                        version=version,
+                        plural=plural
+                    )
+                
+                if result and 'items' in result:
+                    for item in result['items']:
+                        lc_info = {
+                            "name": item.get('metadata', {}).get('name'),
+                            "namespace": item.get('metadata', {}).get('namespace'),
+                            "creation_time": str(item.get('metadata', {}).get('creationTimestamp')),
+                            "spec": item.get('spec', {}),
+                            "status": item.get('status', {}),
+                            "api_version": f"{group}/{version}"
+                        }
+                        logconfig_list.append(lc_info)
+                    
+                    if logconfig_list:
+                        # 找到 LogConfig，跳出循环
+                        break
+            except Exception as e:
+                # 这个组合不存在，继续尝试下一个
+                continue
+        
+        # 清理临时文件
+        for f in temp_files:
+            try:
+                os.unlink(f)
+            except:
+                pass
+        
+        return {
+            "success": True,
+            "cluster_id": cluster_id,
+            "namespace": namespace or "all",
+            "count": len(logconfig_list),
+            "tried_api_combinations": tried_combinations,
+            "logconfigs": logconfig_list,
+            "note": "如果没有找到LogConfig，说明集群可能没有安装相关CRD，或者使用了不同的API版本"
+        }
+        
+    except Exception as e:
+        # 清理临时文件
+        for f in temp_files:
+            try:
+                os.unlink(f)
+            except:
+                pass
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
 
 
 # ========== AOM日志 ==========
@@ -409,12 +729,17 @@ def query_aom_logs(region: str, cluster_id: str, namespace: str = None,
 # ========== 便捷函数 ==========
 
 def get_recent_logs(region: str, log_group_id: str, log_stream_id: str,
-                    hours: int = 1, limit: int = 100,
+                    hours: int = 1, limit: int = 1000,
                     ak: str = None, sk: str = None,
                     project_id: str = None) -> Dict[str, Any]:
     """
     获取最近的日志
     """
+    # Get credentials from environment variables if not provided
+    ak, sk, project_id = get_credentials(ak, sk, project_id)
+    if not ak or not sk:
+        return {"success": False, "error": "Credentials not provided"}
+    
     end_time = datetime.now()
     start_time = end_time - timedelta(hours=hours)
     
@@ -422,7 +747,8 @@ def get_recent_logs(region: str, log_group_id: str, log_stream_id: str,
         region, log_group_id, log_stream_id,
         start_time.strftime('%Y-%m-%d %H:%M:%S'),
         end_time.strftime('%Y-%m-%d %H:%M:%S'),
-        None, limit, ak, sk, project_id
+        None, limit, None, True, False,
+        ak, sk, project_id
     )
 
 

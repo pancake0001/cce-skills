@@ -147,7 +147,8 @@ def node_resource_monitoring_inspection(region: str, cluster_id: str, aom_instan
         "high_cpu_nodes_top10": [],
         "high_memory_nodes_top10": [],
         "high_disk_nodes_top10": [],
-        "all_high_resource_nodes": []
+        "all_high_resource_nodes": [],
+        "monitoring_curves": {}  # 新增：存储监控曲线数据
     }
     
     issues = []
@@ -221,6 +222,13 @@ def node_resource_monitoring_inspection(region: str, cluster_id: str, aom_instan
                             result["high_cpu_nodes_top10"].append(resource_info)
                             add_issue("WARNING", "节点CPU高", instance_ip,
                                 f"节点: {instance_ip}, CPU使用率: {round(latest_value, 2)}%")
+                            
+                            # 获取该节点的CPU时间序列数据
+                            cpu_curve_query = f"100 - (avg by (instance) (irate(node_cpu_seconds_total{{mode='idle', instance='{instance}', cluster_name='{cluster_name}'}}[5m])) * 100)"
+                            cpu_curve_result = get_aom_prom_metrics_http(region, aom_instance_id, cpu_curve_query, hours=1, step=60, ak=access_key, sk=secret_key, project_id=proj_id)
+                            if cpu_curve_result.get("success") and cpu_curve_result.get("result", {}).get("data", {}).get("result"):
+                                key = f"cpu_{instance_ip}"
+                                result["monitoring_curves"][key] = cpu_curve_result["result"]["data"]["result"][0]
                     except (ValueError, IndexError):
                         pass
     
@@ -237,6 +245,43 @@ def node_resource_monitoring_inspection(region: str, cluster_id: str, aom_instan
                 except (ValueError, IndexError):
                     pass
     
+    # 内存 Top 10
+    if result["high_memory_count"] > 0:
+        mem_top10_query = f"topk(10, avg by (instance) ((1 - node_memory_MemAvailable_bytes{{cluster_name='{cluster_name}'}} / node_memory_MemTotal_bytes{{cluster_name='{cluster_name}'}})) * 100)"
+        mem_top10_result = get_aom_prom_metrics_http(region, aom_instance_id, mem_top10_query, ak=access_key, sk=secret_key, project_id=proj_id)
+        
+        if mem_top10_result.get("success") and mem_top10_result.get("result", {}).get("data", {}).get("result"):
+            for item in mem_top10_result["result"]["data"]["result"]:
+                metric = item.get("metric", {})
+                values = item.get("values", [])
+                if values:
+                    try:
+                        latest_value = float(values[-1][1])
+                        instance = metric.get("instance", "unknown")
+                        instance_ip = instance.split(":")[0] if ":" in instance else instance
+                        
+                        if latest_value > 80:
+                            node_info = node_info_map.get(instance_ip, {})
+                            resource_info = {
+                                "instance": instance,
+                                "node_ip": instance_ip,
+                                "node_name": node_info.get("name", instance_ip),
+                                "memory_usage_percent": round(latest_value, 2),
+                                "status": "critical" if latest_value > 90 else "warning"
+                            }
+                            result["high_memory_nodes_top10"].append(resource_info)
+                            add_issue("WARNING", "节点内存高", instance_ip,
+                                f"节点: {instance_ip}, 内存使用率: {round(latest_value, 2)}%")
+                            
+                            # 获取该节点的内存时间序列数据
+                            mem_curve_query = f"avg by (instance) ((1 - node_memory_MemAvailable_bytes{{instance='{instance}', cluster_name='{cluster_name}'}} / node_memory_MemTotal_bytes{{instance='{instance}', cluster_name='{cluster_name}'}})) * 100"
+                            mem_curve_result = get_aom_prom_metrics_http(region, aom_instance_id, mem_curve_query, hours=1, step=60, ak=access_key, sk=secret_key, project_id=proj_id)
+                            if mem_curve_result.get("success") and mem_curve_result.get("result", {}).get("data", {}).get("result"):
+                                key = f"memory_{instance_ip}"
+                                result["monitoring_curves"][key] = mem_curve_result["result"]["data"]["result"][0]
+                    except (ValueError, IndexError):
+                        pass
+    
     # 磁盘数量查询
     disk_count_query = f"count(avg by (instance) ((1 - node_filesystem_avail_bytes{{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',cluster_name='{cluster_name}'}} / node_filesystem_size_bytes{{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',cluster_name='{cluster_name}'}})) * 100 > 80)"
     disk_count_result = get_aom_prom_metrics_http(region, aom_instance_id, disk_count_query, ak=access_key, sk=secret_key, project_id=proj_id)
@@ -249,6 +294,43 @@ def node_resource_monitoring_inspection(region: str, cluster_id: str, aom_instan
                     result["high_disk_count"] = int(float(values[-1][1]))
                 except (ValueError, IndexError):
                     pass
+    
+    # 磁盘 Top 10
+    if result["high_disk_count"] > 0:
+        disk_top10_query = f"topk(10, avg by (instance) ((1 - node_filesystem_avail_bytes{{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',cluster_name='{cluster_name}'}} / node_filesystem_size_bytes{{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',cluster_name='{cluster_name}'}})) * 100)"
+        disk_top10_result = get_aom_prom_metrics_http(region, aom_instance_id, disk_top10_query, ak=access_key, sk=secret_key, project_id=proj_id)
+        
+        if disk_top10_result.get("success") and disk_top10_result.get("result", {}).get("data", {}).get("result"):
+            for item in disk_top10_result["result"]["data"]["result"]:
+                metric = item.get("metric", {})
+                values = item.get("values", [])
+                if values:
+                    try:
+                        latest_value = float(values[-1][1])
+                        instance = metric.get("instance", "unknown")
+                        instance_ip = instance.split(":")[0] if ":" in instance else instance
+                        
+                        if latest_value > 80:
+                            node_info = node_info_map.get(instance_ip, {})
+                            resource_info = {
+                                "instance": instance,
+                                "node_ip": instance_ip,
+                                "node_name": node_info.get("name", instance_ip),
+                                "disk_usage_percent": round(latest_value, 2),
+                                "status": "critical" if latest_value > 90 else "warning"
+                            }
+                            result["high_disk_nodes_top10"].append(resource_info)
+                            add_issue("WARNING", "节点磁盘高", instance_ip,
+                                f"节点: {instance_ip}, 磁盘使用率: {round(latest_value, 2)}%")
+                            
+                            # 获取该节点的磁盘时间序列数据
+                            disk_curve_query = f"avg by (instance) ((1 - node_filesystem_avail_bytes{{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',instance='{instance}',cluster_name='{cluster_name}'}} / node_filesystem_size_bytes{{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',instance='{instance}',cluster_name='{cluster_name}'}})) * 100"
+                            disk_curve_result = get_aom_prom_metrics_http(region, aom_instance_id, disk_curve_query, hours=1, step=60, ak=access_key, sk=secret_key, project_id=proj_id)
+                            if disk_curve_result.get("success") and disk_curve_result.get("result", {}).get("data", {}).get("result"):
+                                key = f"disk_{instance_ip}"
+                                result["monitoring_curves"][key] = disk_curve_result["result"]["data"]["result"][0]
+                    except (ValueError, IndexError):
+                        pass
     
     # 设置状态
     if result["high_cpu_count"] > 0 or result["high_memory_count"] > 0 or result["high_disk_count"] > 0:
