@@ -232,6 +232,64 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_aggregate_inspection_results` | 结果汇总 | 汇总Subagent巡检结果 |
 | `huawei_export_inspection_report` | 报告生成 | 导出HTML格式完整巡检报告 |
 
+#### 网络问题诊断
+
+| 工具 | 功能 | 诊断对象 |
+|------|------|----------|
+| `huawei_network_diagnose` | 工作负载网络问题诊断 | 指定工作负载 |
+| `huawei_network_diagnose_by_alarm` | 基于告警的网络问题诊断 | 触发告警的工作负载 |
+| `huawei_network_scale_workload` | 扩缩容工作负载 | 需二次确认 |
+
+**诊断流程（近1小时数据）：**
+
+1. **分析工作负载监控** - 检查CPU/内存是否有异常上涨，是否有相关告警
+2. **梳理网络链路** - 绘制完整链路图（Pod → Service → Ingress → Nginx-Ingress → ELB → NAT → EIP）
+3. **分析链路组件** - 检查ELB/EIP/NAT/节点的监控和告警
+4. **检查事件日志** - 查看工作负载相关的事件和日志
+5. **检查CoreDNS** - 分析CoreDNS监控、告警和配置
+
+**输出报告包含：**
+- 工作负载基本信息（Pod、节点、Service、Ingress、ELB、NAT、EIP）
+- 监控和告警信息
+- 网络链路拓扑图（异常组件标记红色）
+- 已执行操作及效果
+- 下一步建议
+
+#### 节点问题诊断
+
+| 工具 | 功能 | 诊断对象 |
+|------|------|----------|
+| `huawei_node_batch_diagnose` | 批量节点诊断 | 指定节点或异常节点 |
+| `huawei_node_diagnose` | 单个节点详细诊断 | 指定节点IP |
+| `huawei_list_abnormal_nodes` | 获取异常节点列表 | 集群内NotReady节点 |
+
+**诊断流程（近1小时数据）：**
+
+1. **检查节点状态** - 节点Ready/NotReady状态，异常事件
+2. **检查NPD插件** - Node Problem Detector上报的事件
+3. **分析节点监控** - CPU/内存/磁盘IO/网络流量
+4. **分析工作负载** - 节点上Pod的资源占用情况
+5. **检查VPC安全组** - 针对NotReady节点检查Master-Node通信
+
+**批量诊断规则：**
+- 单次最多分析10个节点
+- 超过10个节点自动写入文件（/root/.openclaw/workspace/report/）
+- 每批分析5个节点
+- 可分批进行后续分析
+
+**操作步骤：**
+1. 驱逐高资源占用Pod（需确认）
+2. 扩容节点池（需确认）
+3. 等待10分钟后验证Pod调度
+4. 重启节点（需确认，单节点异常时）
+
+**输出报告包含：**
+- 节点基本信息（IP、状态、节点池、规格）
+- 节点事件和NPD事件
+- 监控数据分析（CPU/内存/网络）
+- 高资源占用Pod列表
+- 下一步建议
+
 **8大检查项（可独立调用）：**
 | 工具 | 功能 |
 |------|------|

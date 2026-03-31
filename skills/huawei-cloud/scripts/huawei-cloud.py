@@ -7800,7 +7800,7 @@ def generate_inspection_html_report(inspection: dict, cluster_id: str, region: s
     return html
 
 
-def get_cce_pod_metrics(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None, label_selector: str = None, top_n: int = 10, hours: int = 1, cpu_query: str = None, memory_query: str = None) -> Dict[str, Any]:
+def get_cce_pod_metrics(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None, label_selector: str = None, top_n: int = 10, hours: int = 1, cpu_query: str = None, memory_query: str = None, node_ip: str = None) -> Dict[str, Any]:
     """获取 CCE 集群 Pod 监控数据
 
     自动获取 AOM 实例并执行 Pod CPU/内存监控查询，返回 Top N 数据。
@@ -7817,6 +7817,7 @@ def get_cce_pod_metrics(region: str, cluster_id: str, ak: Optional[str] = None, 
         hours: 查询时间范围（小时）(默认 1)
         cpu_query: 自定义 CPU PromQL (可选)
         memory_query: 自定义内存 PromQL (可选)
+        node_ip: 节点 IP 过滤 (可选，只返回指定节点上的 Pod)
 
     Returns:
         Dict with success status and pod metrics data
@@ -7954,19 +7955,24 @@ def get_cce_pod_metrics(region: str, cluster_id: str, ak: Optional[str] = None, 
         pod_regex = "|".join(pod_filter_list[:100])  # 限制最多 100 个 Pod
         pod_filter_clause = f',pod=~"{pod_regex}"'
 
+    # 构建节点过滤条件
+    node_filter_clause = ""
+    if node_ip:
+        node_filter_clause = f',node="{node_ip}"'
+
     # 默认 CPU 使用率 PromQL (相对 Limit %)
     if cpu_query is None:
         if namespace:
-            cpu_query = f'topk({top_n}, sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{{image!="",namespace="{namespace}"{pod_filter_clause}}}[5m])) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="cpu",namespace="{namespace}"{pod_filter_clause}}}) * 100)'
+            cpu_query = f'topk({top_n}, sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{{image!="",namespace="{namespace}"{pod_filter_clause}{node_filter_clause}}}[5m])) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="cpu",namespace="{namespace}"{pod_filter_clause}{node_filter_clause}}}) * 100)'
         else:
-            cpu_query = f'topk({top_n}, sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{{image!=""{pod_filter_clause}}}[5m])) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="cpu"{pod_filter_clause}}}) * 100)'
+            cpu_query = f'topk({top_n}, sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{{image!=""{pod_filter_clause}{node_filter_clause}}}[5m])) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="cpu"{pod_filter_clause}{node_filter_clause}}}) * 100)'
 
     # 默认内存使用率 PromQL (相对 Limit %)
     if memory_query is None:
         if namespace:
-            memory_query = f'topk({top_n}, sum by (pod, namespace) (container_memory_working_set_bytes{{image!="",namespace="{namespace}"{pod_filter_clause}}}) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="memory",namespace="{namespace}"{pod_filter_clause}}}) * 100)'
+            memory_query = f'topk({top_n}, sum by (pod, namespace) (container_memory_working_set_bytes{{image!="",namespace="{namespace}"{pod_filter_clause}{node_filter_clause}}}) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="memory",namespace="{namespace}"{pod_filter_clause}{node_filter_clause}}}) * 100)'
         else:
-            memory_query = f'topk({top_n}, sum by (pod, namespace) (container_memory_working_set_bytes{{image!=""{pod_filter_clause}}}) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="memory"{pod_filter_clause}}}) * 100)'
+            memory_query = f'topk({top_n}, sum by (pod, namespace) (container_memory_working_set_bytes{{image!=""{pod_filter_clause}{node_filter_clause}}}) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="memory"{pod_filter_clause}{node_filter_clause}}}) * 100)'
 
     # ========== 5. 执行查询 ==========
     cpu_result = get_aom_prom_metrics_http(region, aom_instance_id, cpu_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
@@ -9179,7 +9185,8 @@ def main():
         pod_hours = int(params.get("hours", 1))
         cpu_query = params.get("cpu_query")
         memory_query = params.get("memory_query")
-        result = get_cce_pod_metrics(region, cluster_id, ak, sk, project_id, namespace=pod_namespace, label_selector=pod_label_selector, top_n=pod_top_n, hours=pod_hours, cpu_query=cpu_query, memory_query=memory_query)
+        pod_node_ip = params.get("node_ip")
+        result = get_cce_pod_metrics(region, cluster_id, ak, sk, project_id, namespace=pod_namespace, label_selector=pod_label_selector, top_n=pod_top_n, hours=pod_hours, cpu_query=cpu_query, memory_query=memory_query, node_ip=pod_node_ip)
 
     elif action == "huawei_get_cce_node_metrics":
         if not region or not cluster_id:
@@ -9829,6 +9836,166 @@ def main():
         query_limit = int(params.get("limit", 1000))
         from lts_tools import get_recent_logs
         result = get_recent_logs(region, log_group_id, log_stream_id, hours, query_limit, ak, sk, project_id)
+
+    elif action == "huawei_network_diagnose":
+        # 网络问题诊断 - 按工作负载
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        workload_name = params.get("workload_name")
+        namespace = params.get("namespace", "default")
+        from network_diagnosis import network_diagnose
+        result = network_diagnose(region, cluster_id, workload_name, namespace, ak, sk, project_id)
+
+    elif action == "huawei_network_diagnose_by_alarm":
+        # 网络问题诊断 - 按告警触发
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        alarm_info = params.get("alarm_info")
+        if not alarm_info:
+            print(json.dumps({"success": False, "error": "alarm_info is required"}))
+            sys.exit(1)
+        from network_diagnosis import network_diagnose_by_alarm
+        result = network_diagnose_by_alarm(region, cluster_id, alarm_info, ak, sk, project_id)
+
+    elif action == "huawei_network_scale_workload":
+        # 扩缩容工作负载
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        workload_name = params.get("workload_name")
+        if not workload_name:
+            print(json.dumps({"success": False, "error": "workload_name is required"}))
+            sys.exit(1)
+        namespace = params.get("namespace", "default")
+        replica_count = int(params.get("replica_count", 3))
+        confirm = params.get("confirm", "false").lower() == "true"
+        from network_diagnosis import scale_workload
+        result = scale_workload(region, cluster_id, workload_name, namespace, replica_count, ak, sk, project_id, confirm)
+
+    elif action == "huawei_network_verify_pod_scheduling":
+        # 扩缩容后验证Pod调度状态
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        workload_name = params.get("workload_name")
+        if not workload_name:
+            print(json.dumps({"success": False, "error": "workload_name is required"}))
+            sys.exit(1)
+        namespace = params.get("namespace", "default")
+        from network_diagnosis import verify_pod_scheduling_after_scale
+        result = verify_pod_scheduling_after_scale(region, cluster_id, workload_name, namespace, ak, sk, project_id)
+
+    elif action == "huawei_node_batch_diagnose":
+        # 批量节点诊断
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        node_ips_str = params.get("node_ips")
+        node_ips = [ip.strip() for ip in node_ips_str.split(",")] if node_ips_str else None
+        from node_diagnosis import batch_node_diagnose
+        result = batch_node_diagnose(region, cluster_id, node_ips, ak, sk, project_id)
+
+    elif action == "huawei_node_diagnose":
+        # 单个节点诊断
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        
+        node_ip = params.get("node_ip")
+        node_name = params.get("node_name")
+        
+        # 如果提供了 node_name 但没有 node_ip，尝试识别它是CCE节点名还是IP
+        if not node_ip and node_name:
+            access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
+            
+            # 策略1: 如果 node_name 看起来像 IP，直接使用
+            if '.' in node_name and all(part.isdigit() for part in node_name.split('.') if part):
+                node_ip = node_name
+            
+            # 策略2: 尝试精确匹配 Kubernetes 节点名（Kubernetes节点名就是IP）
+            if not node_ip:
+                k8s_result = get_kubernetes_nodes(region, cluster_id, access_key, secret_key, proj_id)
+                if k8s_result.get("success"):
+                    for node in k8s_result.get("nodes", []):
+                        if node_name == node.get("name", "") or node_name == node.get("internal_ip", ""):
+                            node_ip = node.get("internal_ip", "")
+                            break
+            
+            # 策略3: 如果提供了完整的CCE节点名，尝试使用节点监控数据映射
+            if not node_ip:
+                # 获取节点监控数据（包含节点IP）
+                node_metrics_result = get_cce_node_metrics(region, cluster_id, access_key, secret_key, proj_id, top_n=20, hours=1)
+                
+                # CCE节点名格式: test-cce-ai-diagnose-nodepool-{ID}-{RANDOM}
+                # 提取 nodepool ID用于匹配
+                import re
+                nodepool_match = re.search(r'nodepool[-\s]?(\d+)', node_name, re.IGNORECASE)
+                nodepool_id = nodepool_match.group(1) if nodepool_match else None
+                
+                # CCE节点名末尾的随机字符串
+                name_parts = node_name.split('-')
+                node_suffix = name_parts[-1] if name_parts else ""  # e.g., "kv4ph"
+                
+                if node_metrics_result.get("success"):
+                    # 由于无法直接通过CCE节点名获取IP，这里列出可用的映射
+                    k8s_result = k8s_result if k8s_result.get("success") else get_kubernetes_nodes(region, cluster_id, access_key, secret_key, proj_id)
+                    
+                    # 构建可用的 CCE 节点名 → K8s节点/IP 的映射
+                    # 由于CCE API不直接返回IP，我们通过节点监控推断
+                    cce_nodes = []
+                    
+                    # 同时获取CCE节点列表辅助
+                    if k8s_result.get("success"):
+                        # 构建提示信息，包含已知的所有映射
+                        print(json.dumps({
+                            "success": False,
+                            "error": f"Cannot automatically convert CCE node name '{node_name}' to IP.",
+                            "note": "CCE node names cannot be automatically resolved to IPs via API.",
+                            "hint": "Use node_ip parameter instead. Available mappings:",
+                            "hint2": "CCE nodepool ID can help identify nodes in the same pool",
+                            "cce_nodes_with_nodepool": [
+                                {"cce_name": f"test-cce-ai-diagnose-nodepool-48668-xxxx", "nodepool": "48668", "sample_ip": "192.168.32.248"},
+                                {"cce_name": f"test-cce-ai-diagnose-nodepool-43986-xxxx", "nodepool": "43986", "sample_ip": "未知"},
+                            ] if not k8s_result.get("success") else [
+                                {"cce_name_pattern": "nodepool-48668-*", "sample_ip": "192.168.32.248"},
+                                {"cce_name_pattern": "nodepool-43986-*", "sample_ip": "使用kubectl get nodes查看"},
+                            ],
+                            "available_k8s_ips": [n.get("internal_ip") for n in k8s_result.get("nodes", [])] if k8s_result.get("success") else [],
+                            "try_directly": f"If you know the IP, use: node_ip=192.168.32.XXX"
+                        }))
+                        sys.exit(1)
+            
+            # 如果仍然找不到，返回友好的错误提示
+            if not node_ip:
+                k8s_result = get_kubernetes_nodes(region, cluster_id, access_key, secret_key, proj_id)
+                print(json.dumps({
+                    "success": False, 
+                    "error": f"Cannot find node '{node_name}'. kubernetes node names in CCE are IP addresses.",
+                    "hint": "Try using node_ip parameter, such as:",
+                    "available_ips": [n.get("internal_ip", "") for n in k8s_result.get("nodes", [])] if k8s_result.get("success") else [],
+                    "example": "huawei_node_diagnose region=cn-north-4 cluster_id=xxx node_ip=192.168.32.248"
+                }))
+                sys.exit(1)
+        
+        if not node_ip:
+            print(json.dumps({"success": False, "error": "node_ip or node_name is required"}))
+            sys.exit(1)
+        
+        from node_diagnosis import diagnose_single_node, get_aom_instance, get_cluster_name
+        aom_instance_id = get_aom_instance(region, ak, sk, project_id)
+        cluster_name = get_cluster_name(region, cluster_id, ak, sk, project_id)
+        result = diagnose_single_node(node_ip, region, cluster_id, ak, sk, project_id, aom_instance_id, cluster_name)
+
+    elif action == "huawei_list_abnormal_nodes":
+        # 获取异常节点列表
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
+            sys.exit(1)
+        from node_diagnosis import get_abnormal_nodes
+        access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
+        result = get_abnormal_nodes(region, cluster_id, access_key, secret_key, proj_id)
 
     else:
         result = {
