@@ -7,7 +7,6 @@ metadata:
 data:
   openclaw.json: |
     {{- $config := dict }}
-    {{- /* Build agents.defaults section */ -}}
     {{- $agentDefaults := dict }}
     {{- if .Values.openclaw.agents.defaults.model }}
     {{- $_ := set $agentDefaults "model" (dict "primary" .Values.openclaw.agents.defaults.model) }}
@@ -18,21 +17,87 @@ data:
     {{- if .Values.openclaw.agents.defaults.thinkingDefault }}
     {{- $_ := set $agentDefaults "thinkingDefault" .Values.openclaw.agents.defaults.thinkingDefault }}
     {{- end }}
+    {{- if .Values.openclaw.agents.defaults.compaction.enabled }}
+    {{- $compaction := dict "mode" .Values.openclaw.agents.defaults.compaction.mode }}
+    {{- if .Values.openclaw.agents.defaults.compaction.model }}
+    {{- $_ := set $compaction "model" .Values.openclaw.agents.defaults.compaction.model }}
+    {{- end }}
+    {{- if .Values.openclaw.agents.defaults.compaction.reserveTokensFloor }}
+    {{- $_ := set $compaction "reserveTokensFloor" .Values.openclaw.agents.defaults.compaction.reserveTokensFloor }}
+    {{- end }}
+    {{- if .Values.openclaw.agents.defaults.compaction.memoryFlush.enabled }}
+    {{- $memoryFlush := dict "enabled" true "softThresholdTokens" .Values.openclaw.agents.defaults.compaction.memoryFlush.softThresholdTokens }}
+    {{- if .Values.openclaw.agents.defaults.compaction.memoryFlush.prompt }}
+    {{- $_ := set $memoryFlush "prompt" .Values.openclaw.agents.defaults.compaction.memoryFlush.prompt }}
+    {{- end }}
+    {{- $_ := set $compaction "memoryFlush" $memoryFlush }}
+    {{- end }}
+    {{- $_ := set $agentDefaults "compaction" $compaction }}
+    {{- end }}
+    {{- if .Values.openclaw.agents.defaults.contextPruning.enabled }}
+    {{- $contextPruning := dict "mode" .Values.openclaw.agents.defaults.contextPruning.mode "ttl" .Values.openclaw.agents.defaults.contextPruning.ttl "keepLastAssistants" .Values.openclaw.agents.defaults.contextPruning.keepLastAssistants }}
+    {{- $_ := set $agentDefaults "contextPruning" $contextPruning }}
+    {{- end }}
+    {{- if and .Values.sandbox.enabled .Values.sandbox.agents.list }}
+    {{- $sandboxDefaults := dict "mode" "all" "backend" "ssh" "scope" "agent" }}
+    {{- $_ := set $sandboxDefaults "ssh" (dict
+      "workspaceRoot" "/home/openclaw/workspace"
+      "strictHostKeyChecking" false
+      "updateHostKeys" true
+      "identityFile" "/home/openclaw/.ssh/gateway_sandbox_key"
+    )}}
+    {{- $_ := set $agentDefaults "sandbox" $sandboxDefaults }}
+    {{- end }}
     {{- if $agentDefaults }}
     {{- $_ := set $config "agents" (dict "defaults" $agentDefaults) }}
     {{- end }}
-    {{- /* Add browser CDP config if chromium sidecar is enabled */ -}}
+    {{- if .Values.openclaw.agents.list }}
+    {{- $agents := index $config "agents" | default dict }}
+    {{- $agentsList := .Values.openclaw.agents.list }}
+    {{- if and .Values.sandbox.enabled .Values.sandbox.agents.list }}
+    {{- $sandboxAgentsMap := dict }}
+    {{- range $sa := .Values.sandbox.agents.list }}
+    {{- $_ := set $sandboxAgentsMap $sa.id $sa }}
+    {{- end }}
+    {{- range $i, $agent := $agentsList }}
+    {{- $sandboxCfg := index $sandboxAgentsMap $agent.id }}
+    {{- if and $sandboxCfg $sandboxCfg.enabled }}
+    {{- $sandboxConfig := dict "backend" "ssh" "scope" "agent" }}
+    {{- $workspaceRoot := printf "/home/sandbox/workspace/%s" (default .id $sandboxCfg.workspaceSubPath) }}
+    {{- $_ := set $sandboxConfig "ssh" (dict
+      "target" (printf "sandbox@%s-sandbox-%s.%s.svc.cluster.local:22" $.Release.Name $agent.id (default "openclaw" $.Release.Namespace))
+      "workspaceRoot" $workspaceRoot
+      "strictHostKeyChecking" false
+      "updateHostKeys" true
+      "identityFile" "/home/openclaw/.ssh/gateway_sandbox_key"
+    )}}
+    {{- $_ := set $sandboxConfig "workspaceAccess" "rw" }}
+    {{- $_ := set $agent "sandbox" $sandboxConfig }}
+    {{- end }}
+    {{- end }}
+    {{- end }}
+    {{- $_ := set $agents "list" $agentsList }}
+    {{- $_ := set $config "agents" $agents }}
+    {{- end }}
+    {{- if .Values.openclaw.bindings }}
+    {{- $_ := set $config "bindings" .Values.openclaw.bindings }}
+    {{- end }}
     {{- if .Values.chromium.enabled }}
     {{- $_ := set $config "browser" (dict "cdpUrl" "http://localhost:9222") }}
     {{- end }}
-    {{- /* Set gateway mode */ -}}
+    {{- if .Values.openclaw.gateway }}
+    {{- $gateway := .Values.openclaw.gateway }}
+    {{- if not $gateway.mode }}
+    {{- $_ := set $gateway "mode" "local" }}
+    {{- end }}
+    {{- $_ := set $config "gateway" $gateway }}
+    {{- else }}
     {{- $_ := set $config "gateway" (dict "mode" "local") }}
-    {{- /* Add model providers if configured */ -}}
+    {{- end }}
     {{- if .Values.openclaw.providers }}
     {{- $models := dict "mode" "merge" "providers" .Values.openclaw.providers }}
     {{- $_ := set $config "models" $models }}
     {{- end }}
-    {{- /* Merge any user-provided overrides */ -}}
     {{- if .Values.openclaw.configOverrides }}
     {{- $config = mergeOverwrite $config .Values.openclaw.configOverrides }}
     {{- end }}

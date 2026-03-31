@@ -18,6 +18,34 @@ data:
   USER.md: |
     {{- .Values.workspace.user | nindent 4 }}
   {{- end }}
+  {{- if .Values.workspace.inspection }}
+  INSPECTION.md: |
+    {{- .Values.workspace.inspection | nindent 4 }}
+  {{- end }}
+  {{- if .Values.workspace.alerts }}
+  ALERTS.md: |
+    {{- .Values.workspace.alerts | nindent 4 }}
+  {{- end }}
+  {{- if .Values.workspace.runbook }}
+  RUNBOOK.md: |
+    {{- .Values.workspace.runbook | nindent 4 }}
+  {{- end }}
+  {{- if .Values.workspace.knowledge }}
+  KNOWLEDGE.md: |
+    {{- .Values.workspace.knowledge | nindent 4 }}
+  {{- end }}
+  {{- if .Values.workspace.guardrails }}
+  GUARDRAILS.md: |
+    {{- .Values.workspace.guardrails | nindent 4 }}
+  {{- end }}
+  {{- if .Values.workspace.report }}
+  REPORT.md: |
+    {{- .Values.workspace.report | nindent 4 }}
+  {{- end }}
+  {{- if .Values.workspace.agents }}
+  AGENTS.md: |
+    {{- .Values.workspace.agents | nindent 4 }}
+  {{- end }}
   {{- range $filename, $content := .Values.workspace.extraFiles }}
   {{ $filename }}: |
     {{- $content | nindent 4 }}

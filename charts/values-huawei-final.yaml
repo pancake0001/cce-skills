@@ -1,0 +1,213 @@
+# =============================================================================
+# OpenClaw on Huawei Cloud CCE - Deployment Values
+# Cluster: test-cce-ai-diagnose (cn-north-4)
+# =============================================================================
+
+namespace: openclaw
+
+imagePullSecrets:
+  - name: default-secret
+
+# -----------------------------------------------------------------------------
+# OpenClaw Gateway Image (on SWR)
+# -----------------------------------------------------------------------------
+image:
+  repository: swr.cn-north-4.myhuaweicloud.com/pancake/openclaw
+  tag: "2026.03.28-huawei"
+  pullPolicy: IfNotPresent
+
+# -----------------------------------------------------------------------------
+# Sandbox SSH Configuration
+# -----------------------------------------------------------------------------
+sandbox:
+  enabled: true
+
+  # SSH sandbox image (on SWR - built with dropbear)
+  image:
+    repository: swr.cn-north-4.myhuaweicloud.com/pancake/openclaw-sandbox
+    tag: "2026.03.28-openssh-v5"
+    pullPolicy: IfNotPresent
+
+  # Shared workspace PVC (requires ReadWriteMany)
+  workspace:
+    enabled: true
+    pvcName: openclaw-sandbox-workspace  # Use existing PVC
+    size: 10Gi
+    storageClass: csi-obs  # Huawei Cloud OBS storage with RWX support
+    accessMode: ReadWriteMany
+    csiSecretName: "obs-credentials"  # Secret name for OBS credentials
+    csiSecretNamespace: "openclaw"     # Namespace where the secret resides
+
+  # SSH key pair for gateway ↔ sandbox authentication
+  # Generate with: ssh-keygen -t ed25519 -f /tmp/gateway_sandbox_key
+  # Create Secret manually (required - key must exist before helm install):
+  #   kubectl create secret generic openclaw-ssh-key \
+  #     --from-file=privateKey=/tmp/gateway_sandbox_key -n openclaw
+  # Then reference it below:
+  sshSecretName: "openclaw-ssh-key"
+
+  # Pre-created ConfigMap containing authorized_keys (public key)
+  # Create with: kubectl create configmap ssh-authorized-keys --from-file=authorized_keys=/tmp/gateway_sandbox_key.pub -n openclaw
+  sshAuthorizedKeysConfigMap: "ssh-authorized-keys"
+
+  # Resource limits per sandbox pod
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+  # Security context
+  securityContext:
+    runAsUser: 0        # SSHd needs to run as root to generate host keys
+    runAsGroup: 0
+    runAsNonRoot: false
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
+
+  # Per-agent sandbox configuration
+  agents:
+    list:
+      - id: bob
+        enabled: true
+        workspaceSubPath: workspace-bob
+        envSecretRef: "bob-huawei-credentials"
+        tools:
+          allow: ["read", "exec", "sessions_list", "sessions_history"]
+          deny: ["write", "edit", "apply_patch", "delete", "browser"]
+      - id: alice
+        enabled: true
+        workspaceSubPath: workspace-alice
+        envSecretRef: "alice-huawei-credentials"
+        tools:
+          allow: ["*"]
+          deny: []
+
+# -----------------------------------------------------------------------------
+# OpenClaw Gateway Configuration
+# -----------------------------------------------------------------------------
+service:
+  type: NodePort
+  port: 18789
+  canvasPort: 18790
+
+openclaw:
+  bind: "lan"
+  timezone: "Asia/Shanghai"
+
+  gateway:
+    controlUi:
+      dangerouslyAllowHostHeaderOriginFallback: true
+
+  providers:
+    minimax:
+      apiKey: "${MINIMAX_API_KEY}"
+
+  agents:
+    defaults:
+      model: "minimax/MiniMax-M2.7"
+      timeoutSeconds: 600
+      thinkingDefault: "low"
+
+    # Agent definitions
+    list:
+      - id: alice
+        workspace: ~/.openclaw/workspace-alice
+        sandbox:
+          enabled: true
+          backend: ssh
+          scope: agent
+          workspaceAccess: rw
+          ssh:
+            target: "openclaw-sandbox-alice"
+            workspaceRoot: /home/openclaw/workspace
+        tools:
+          allow: ["*"]
+      - id: bob
+        workspace: ~/.openclaw/workspace-bob
+        sandbox:
+          enabled: true
+          backend: ssh
+          scope: agent
+          workspaceAccess: ro
+          ssh:
+            target: "openclaw-sandbox-bob"
+            workspaceRoot: /home/openclaw/workspace
+        tools:
+          allow: ["read", "exec", "sessions_list", "sessions_history"]
+          deny: ["write", "edit", "apply_patch", "delete", "browser"]
+
+# -----------------------------------------------------------------------------
+# Persistence
+# -----------------------------------------------------------------------------
+persistence:
+  enabled: true
+  size: 5Gi
+  storageClass: csi-obs
+  accessMode: ReadWriteMany
+  csiSecretName: "obs-credentials"
+  csiSecretNamespace: "openclaw"
+
+# -----------------------------------------------------------------------------
+# Credentials
+# -----------------------------------------------------------------------------
+credentials:
+  # Use pre-created secret containing MINIMAX_API_KEY
+  existingSecret: "maas-credentials"
+  gatewayToken: ""  # Auto-generated if empty
+
+# -----------------------------------------------------------------------------
+# Workspace files
+# -----------------------------------------------------------------------------
+workspace:
+  enabled: true
+
+  soul: |
+    # SOUL
+
+    You are {{ AGENT_NAME }}, a helpful AI assistant.
+
+    ## Core Identity
+    - You are part of a team of AI assistants
+    - You collaborate with other agents when needed
+    - Always be helpful, honest, and focused
+
+    ## Personality
+    - Concise and direct
+    - Curious and willing to learn
+    - Respectful of team members
+
+  identity: |
+    # IDENTITY
+
+    Name: {{ AGENT_NAME }}
+    Role: AI Assistant
+    Emoji: 🤖
+
+# -----------------------------------------------------------------------------
+# Probes
+# -----------------------------------------------------------------------------
+probes:
+  readiness:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  liveness:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  startup:
+    enabled: true
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 30

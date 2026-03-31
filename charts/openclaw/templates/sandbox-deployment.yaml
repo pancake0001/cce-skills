@@ -1,0 +1,190 @@
+{{/*
+Sandbox Pods - One per agent, each with SSH server for remote tool execution.
+Each sandbox pod is accessed by the central Gateway via SSH.
+*/}}
+{{- if and .Values.sandbox.enabled .Values.sandbox.agents.list }}
+{{- $root := . }}
+{{- $workspacePvc := .Values.sandbox.workspace.pvcName | default (printf "%s-workspace" (include "openclaw.fullname" .)) }}
+
+{{- range .Values.sandbox.agents.list }}
+{{- if .enabled }}
+{{- $agent := . }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-sandbox-%s" $root.Release.Name .id | trunc 253 | trimSuffix "-" }}
+  labels:
+    {{- include "openclaw.labels" $root | nindent 4 }}
+    openclaw.agent: {{ .id }}
+    app.kubernetes.io/component: sandbox
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      openclaw.agent: {{ .id }}
+      app.kubernetes.io/component: sandbox
+  template:
+    metadata:
+      labels:
+        openclaw.agent: {{ .id }}
+        app.kubernetes.io/component: sandbox
+      annotations:
+        {{- include "openclaw.labels" $root | nindent 6 }}
+    spec:
+      {{- with $root.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $root.Values.podSecurityContext | nindent 8 }}
+        runAsNonRoot: false
+      initContainers:
+        - name: init-workspace
+          image: "{{ $root.Values.sandbox.image.repository }}:{{ $root.Values.sandbox.image.tag }}"
+          imagePullPolicy: {{ $root.Values.sandbox.image.pullPolicy }}
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Initializing sandbox for agent {{ .id }}..."
+              # Create .ssh dir with 0700 on emptyDir volume (takes precedence over Dockerfile layer)
+              mkdir -p /var/run/sandbox/.ssh
+              chmod 700 /var/run/sandbox
+              chmod 700 /var/run/sandbox/.ssh
+              # Copy authorized_keys with 0600
+              rm -f /var/run/sandbox/.ssh/authorized_keys
+              cp /tmp/ssh-auth/authorized_keys /var/run/sandbox/.ssh/authorized_keys
+              chmod 600 /var/run/sandbox/.ssh/authorized_keys
+              chown sandbox:sandbox /var/run/sandbox/.ssh /var/run/sandbox/.ssh/authorized_keys
+              echo "Setup complete."
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: workspace
+              mountPath: /home/sandbox/workspace
+            - name: ssh-authorized-keys
+              mountPath: /tmp/ssh-auth
+              readOnly: true
+            - name: sshd-auth
+              mountPath: /var/run/sandbox/.ssh
+      containers:
+        - name: sshd
+          image: "{{ $root.Values.sandbox.image.repository }}:{{ $root.Values.sandbox.image.tag }}"
+          imagePullPolicy: {{ $root.Values.sandbox.image.pullPolicy }}
+          ports:
+            - name: ssh
+              containerPort: 22
+              protocol: TCP
+          env:
+            - name: HOME
+              value: /var/run/sandbox
+            {{- range $root.Values.sandbox.env }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
+            {{- range .env }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
+          {{- if .envSecretRef }}
+          envFrom:
+            - secretRef:
+                name: {{ .envSecretRef }}
+          {{- end }}
+          command:
+            - /usr/sbin/sshd
+            - -D
+            - -e
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - name: workspace
+              mountPath: /home/sandbox/workspace
+            - name: sshd-auth
+              mountPath: /var/run/sandbox/.ssh
+          resources:
+            {{- toYaml $root.Values.sandbox.resources | nindent 12 }}
+          {{- if $root.Values.probes.readiness.enabled }}
+          readinessProbe:
+            tcpSocket:
+              port: ssh
+            initialDelaySeconds: {{ $root.Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ $root.Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ $root.Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ $root.Values.probes.readiness.failureThreshold }}
+          {{- end }}
+          {{- if $root.Values.probes.liveness.enabled }}
+          livenessProbe:
+            tcpSocket:
+              port: ssh
+            initialDelaySeconds: {{ $root.Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ $root.Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ $root.Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ $root.Values.probes.liveness.failureThreshold }}
+          {{- end }}
+          {{- if $root.Values.probes.startup.enabled }}
+          startupProbe:
+            tcpSocket:
+              port: ssh
+            initialDelaySeconds: {{ $root.Values.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ $root.Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ $root.Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ $root.Values.probes.startup.failureThreshold }}
+          {{- end }}
+      volumes:
+        - name: workspace
+          {{- if and $root.Values.sandbox.workspace.enabled $workspacePvc }}
+          persistentVolumeClaim:
+            claimName: {{ $workspacePvc }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: ssh-authorized-keys
+          configMap:
+            name: {{ $root.Values.sandbox.sshAuthorizedKeysConfigMap | default (printf "%s-ssh-authorized-keys" $root.Release.Name) }}
+            optional: false
+            defaultMode: 0600
+            items:
+              - key: authorized_keys
+                path: authorized_keys
+        - name: sshd-auth
+          emptyDir: {}
+      {{- with $root.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-sandbox-%s" $root.Release.Name .id | trunc 253 | trimSuffix "-" }}
+  labels:
+    {{- include "openclaw.labels" $root | nindent 4 }}
+    openclaw.agent: {{ .id }}
+    app.kubernetes.io/component: sandbox
+spec:
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: ssh
+      protocol: TCP
+  selector:
+    openclaw.agent: {{ .id }}
+    app.kubernetes.io/component: sandbox
+{{- end }}
+{{- end }}
+{{- end }}

@@ -1,0 +1,25 @@
+{{- if and .Values.sandbox.enabled .Values.sandbox.workspace.enabled }}
+{{- $pvcName := .Values.sandbox.workspace.pvcName | default (printf "%s-workspace" (include "openclaw.fullname" .)) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $pvcName }}
+  labels:
+    {{- include "openclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: workspace
+  annotations:
+    csi.storage.k8s.io/fstype: {{ .Values.sandbox.workspace.csiFsType | default "obsfs" }}
+    {{- if .Values.sandbox.workspace.csiSecretName }}
+    csi.storage.k8s.io/node-publish-secret-name: {{ .Values.sandbox.workspace.csiSecretName }}
+    csi.storage.k8s.io/node-publish-secret-namespace: {{ .Values.sandbox.workspace.csiSecretNamespace | default $.Release.Namespace }}
+    {{- end }}
+spec:
+  accessModes:
+    - {{ .Values.sandbox.workspace.accessMode | default "ReadWriteMany" }}
+  {{- if .Values.sandbox.workspace.storageClass }}
+  storageClassName: {{ .Values.sandbox.workspace.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.sandbox.workspace.size | default "10Gi" }}
+{{- end }}

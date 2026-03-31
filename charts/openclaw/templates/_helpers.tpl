@@ -85,3 +85,37 @@ Create the name of the PVC
 {{- define "openclaw.pvcName" -}}
 {{- include "openclaw.fullname" . }}
 {{- end }}
+
+{{/*
+Create the sandbox workspace PVC name
+*/}}
+{{- define "openclaw.sandbox.workspacePvcName" -}}
+{{- .Values.sandbox.workspace.pvcName | default (printf "%s-workspace" (include "openclaw.fullname" .)) }}
+{{- end }}
+
+{{/*
+Create the sandbox hostkeys secret name
+*/}}
+{{- define "openclaw.sandbox.hostKeySecretName" -}}
+{{- .Values.sandbox.hostKeySecret | default (printf "%s-sandbox-hostkeys" (include "openclaw.fullname" .)) }}
+{{- end }}
+
+{{/*
+Get the sandbox service DNS name for a given agent
+*/}}
+{{- define "openclaw.sandbox.serviceName" -}}
+{{- printf "%s-sandbox-%s.%s.svc.cluster.local" (include "openclaw.fullname" .) .id .Release.Namespace }}
+{{- end }}
+
+{{/*
+Generate auth profiles JSON for agent auth stores.
+Usage: {{ include "openclaw.authProfilesJson" . }}
+*/}}
+{{- define "openclaw.authProfilesJson" -}}
+{{- $auth := .Values.openclaw.auth -}}
+{{- if and $auth $auth.profiles -}}
+{"version":1,"profiles":{{ toJson $auth.profiles }}}
+{{- else -}}
+{}
+{{- end -}}
+{{- end }}

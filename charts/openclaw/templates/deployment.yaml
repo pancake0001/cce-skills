@@ -66,16 +66,34 @@ spec:
               else
                 cp /config/openclaw.json /home/openclaw/.openclaw/openclaw.json
               fi
+              # Create auth-profiles.json for each agent if auth is configured
+              {{- if .Values.openclaw.auth }}
+              {{- range $agent := .Values.openclaw.agents.list }}
+              mkdir -p /home/openclaw/.openclaw/agents/{{ $agent.id }}/agent
+              echo '{{ include "openclaw.authProfilesJson" $ | trim }}' > /home/openclaw/.openclaw/agents/{{ $agent.id }}/agent/auth-profiles.json
+              {{- end }}
+              {{- end }}
               chown -R 1000:1000 /home/openclaw/.openclaw
           securityContext:
             runAsUser: 0
             runAsNonRoot: false
+          envFrom:
+            {{- if .Values.sandbox.enabled }}
+            - secretRef:
+                name: {{ include "openclaw.secretName" . }}
+            {{- end }}
           volumeMounts:
             - name: data
               mountPath: /home/openclaw/.openclaw
             - name: config
               mountPath: /config
               readOnly: true
+            {{- if .Values.sandbox.enabled }}
+            - name: ssh-key
+              mountPath: /home/openclaw/.ssh/gateway_sandbox_key
+              subPath: privateKey
+              readOnly: true
+            {{- end }}
         {{- if .Values.workspace.enabled }}
         - name: init-workspace
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -193,6 +211,12 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /home/openclaw/.openclaw
+            {{- if .Values.sandbox.enabled }}
+            - name: ssh-key
+              mountPath: /home/openclaw/.ssh/gateway_sandbox_key
+              subPath: privateKey
+              readOnly: true
+            {{- end }}
         {{- if .Values.chromium.enabled }}
         - name: chromium
           image: "{{ .Values.chromium.image.repository }}:{{ .Values.chromium.image.tag }}"
@@ -226,6 +250,12 @@ spec:
         - name: workspace-files
           configMap:
             name: {{ include "openclaw.fullname" . }}-workspace
+        {{- end }}
+        {{- if .Values.sandbox.enabled }}
+        - name: ssh-key
+          secret:
+            secretName: {{ .Values.sandbox.sshSecretName | default (printf "%s-ssh-key" .Release.Name) }}
+            optional: false
         {{- end }}
         - name: data
           {{- if .Values.persistence.enabled }}

@@ -1,0 +1,25 @@
+{{/*
+SSH authorized_keys ConfigMap for sandbox pods.
+
+NOTE: If sandbox.sshAuthorizedKeysConfigMap is set, this template does nothing.
+The user is expected to pre-create the ConfigMap:
+  kubectl create configmap ssh-authorized-keys \
+    --from-file=authorized_keys=/tmp/gateway_sandbox_key.pub -n openclaw
+
+If sandbox.sshAuthorizedKeysConfigMap is not set but sandbox.authorizedKeys is set,
+this template auto-generates the ConfigMap (legacy behavior).
+*/}}
+{{- if and .Values.sandbox.enabled .Values.sandbox.agents.list }}
+{{- if and .Values.sandbox.authorizedKeys (not .Values.sandbox.sshAuthorizedKeysConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "openclaw.fullname" . }}-ssh-authorized-keys
+  labels:
+    {{- include "openclaw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sandbox
+data:
+  authorized_keys: |
+    {{- .Values.sandbox.authorizedKeys | nindent 4 }}
+{{- end }}
+{{- end }}
