@@ -52,3 +52,12 @@ kubectl annotate secret obs-credentials \
 kubectl create secret generic maas-credentials \
   --namespace=openclaw \
   --from-literal=MINIMAX_API_KEY=your_minimax_key
+
+
+## 执行安装
+执行如下命令：
+helm upgrade --install openclaw ./charts/openclaw   --namespace openclaw   -f ./charts/values-huawei-final.yaml
+
+### 本地访问
+在使用kubectl开启port-forward，可以直接打开web页面进行访问http://127.0.0.1:18790/，注意token需要从openclaw的容器中读取。
+ kubectl port-forward --namespace openclaw svc/openclaw 18790:18789
