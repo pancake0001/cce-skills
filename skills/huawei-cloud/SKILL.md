@@ -211,8 +211,10 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 
 | 工具 | 功能 |
 |------|------|
-| `huawei_get_cce_pod_metrics` | 获取Pod CPU/内存使用率 Top N |
-| `huawei_get_cce_node_metrics` | 获取节点 CPU/内存/磁盘使用率 Top N |
+| `huawei_get_cce_pod_metrics_topN` | 获取Pod CPU/内存使用率 Top N |
+| `huawei_get_cce_pod_metrics` | 获取指定Pod的CPU/内存使用率时序监控数据 |
+| `huawei_get_cce_node_metrics_topN` | 获取节点 CPU/内存/磁盘使用率 Top N |
+| `huawei_get_cce_node_metrics` | 获取指定节点的CPU/内存/磁盘使用率时序监控数据 |
 
 #### 集群日志查询
 
@@ -326,8 +328,8 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 |------|------|
 | `huawei_list_log_groups` | 查询日志组列表 |
 | `huawei_list_log_streams` | 查询日志流列表（可按日志组过滤） |
-| `huawei_query_logs` | 按时间范围/关键词查询日志内容 |
-| `huawei_get_recent_logs` | 查询最近N小时的日志 |
+| `huawei_query_logs` | 按时间范围/关键词/标签过滤查询日志内容 ✅ **新增 `labels` 参数标签过滤** |
+| `huawei_get_recent_logs` | 查询最近N小时的日志 ✅ **新增 `labels` 参数标签过滤** |
 
 **查询示例：**
 ```bash
@@ -343,6 +345,33 @@ python3 huawei-cloud.py huawei_query_logs \
   log_group_id=xxx \
   log_stream_id=xxx \
   keywords=ERROR
+
+# 按标签过滤查询日志 (labels参数为JSON格式字典)
+python3 huawei-cloud.py huawei_query_logs \
+  region=cn-north-4 \
+  log_group_id=xxx \
+  log_stream_id=xxx \
+  labels='{"appName": "openclaw", "namespace": "default"}'
+
+# 按标签查询最近1小时日志
+python3 huawei-cloud.py huawei_get_recent_logs \
+  region=cn-north-4 \
+  log_group_id=xxx \
+  log_stream_id=xxx \
+  hours=1 \
+  labels='{"appName": "openclaw", "namespace": "default"}'
+
+# 自定义时间范围查询指定应用日志（自动匹配日志流+自动加标签）
+python3 huawei-cloud.py huawei_query_application_logs \
+  region=cn-north-4 \
+  cluster_id=034b98c7-1c4d-11f1-842d-0255ac100249 \
+  namespace=default \
+  app_name=online-products \
+  start_time="2026-03-31 00:00:00" \
+  end_time="2026-03-31 20:00:00" \
+  limit=50 \
+  keywords=ERROR \
+  labels='{"env": "prod", "version": "v1.2.3"}'
 ```
 
 ---
@@ -404,3 +433,4 @@ python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 
 ## References
 - [CCE安全组配置说明](./references/CCE_Security_Group_Configuration.md)
+- [CCE节点故障检测策略配置指南](./references/CCE节点故障检测策略配置指南.md)

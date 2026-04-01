@@ -7800,7 +7800,7 @@ def generate_inspection_html_report(inspection: dict, cluster_id: str, region: s
     return html
 
 
-def get_cce_pod_metrics(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None, label_selector: str = None, top_n: int = 10, hours: int = 1, cpu_query: str = None, memory_query: str = None, node_ip: str = None) -> Dict[str, Any]:
+def get_cce_pod_metrics_topN(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None, label_selector: str = None, top_n: int = 10, hours: int = 1, cpu_query: str = None, memory_query: str = None) -> Dict[str, Any]:
     """获取 CCE 集群 Pod 监控数据
 
     自动获取 AOM 实例并执行 Pod CPU/内存监控查询，返回 Top N 数据。
@@ -8074,7 +8074,152 @@ def get_cce_pod_metrics(region: str, cluster_id: str, ak: Optional[str] = None, 
     return result
 
 
-def get_cce_node_metrics(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, top_n: int = 10, hours: int = 1, cpu_query: str = None, memory_query: str = None, disk_query: str = None) -> Dict[str, Any]:
+def get_cce_pod_metrics(region: str, cluster_id: str, pod_name: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, namespace: str = None, hours: int = 1, cpu_query: str = None, memory_query: str = None) -> Dict[str, Any]:
+    """获取指定CCE Pod的CPU、内存使用率监控时序数据
+
+    Args:
+        region: 华为云区域 (如 cn-north-4)
+        cluster_id: CCE 集群 ID
+        pod_name: Pod名称
+        ak: Access Key ID (可选)
+        sk: Secret Access Key (可选)
+        project_id: Project ID (可选)
+        namespace: 命名空间（可选，默认所有命名空间）
+        hours: 查询时间范围（小时）(默认 1)
+        cpu_query: 自定义 CPU PromQL (可选)
+        memory_query: 自定义内存 PromQL (可选)
+
+    Returns:
+        Dict with success status and specified pod metrics time series data
+    """
+    import time as time_module
+
+    access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Credentials not provided"}
+
+    if not cluster_id or not pod_name:
+        return {"success": False, "error": "cluster_id and pod_name are required"}
+
+    # ========== 1. 获取集群名称 ==========
+    cluster_name = cluster_id
+    try:
+        clusters_result = list_cce_clusters(region, access_key, secret_key, proj_id)
+        if clusters_result.get("success"):
+            for c in clusters_result.get("clusters", []):
+                if c.get("id") == cluster_id:
+                    cluster_name = c.get("name", cluster_id)
+                    break
+    except Exception:
+        pass
+
+    # ========== 2. 获取Pod详细信息 ==========
+    pod_info = {}
+    pods_result = get_kubernetes_pods(region, cluster_id, access_key, secret_key, proj_id, namespace)
+    if pods_result.get("success"):
+        for pod in pods_result.get("pods", []):
+            if pod.get("name") == pod_name:
+                pod_info = pod
+                break
+
+    # ========== 3. 获取 AOM 实例 ==========
+    aom_instance_id = None
+    aom_instances = list_aom_instances(region, access_key, secret_key, proj_id)
+    cce_instances = []
+    if aom_instances.get("success"):
+        for instance in aom_instances.get("instances", []):
+            if instance.get("type") == "CCE":
+                cce_instances.append(instance)
+
+    # 测试每个 CCE 实例，找到有数据的
+    for instance in cce_instances:
+        test_instance_id = instance.get("id")
+        test_result = get_aom_prom_metrics_http(region, test_instance_id, "up", hours=0.1, ak=access_key, sk=secret_key, project_id=proj_id)
+        if test_result.get("success") and test_result.get("result", {}).get("data", {}).get("result"):
+            aom_instance_id = test_instance_id
+            break
+
+    if not aom_instance_id:
+        return {
+            "success": False,
+            "error": "未找到可用的 AOM 实例",
+            "cluster_id": cluster_id,
+            "cluster_name": cluster_name,
+            "pod_name": pod_name,
+            "namespace": namespace
+        }
+
+    # ========== 4. 构建 PromQL 查询（筛选指定Pod） ==========
+    pod_filter = f',pod="{pod_name}"'
+    namespace_filter = f',namespace="{namespace}"' if namespace else ""
+
+    # 默认 CPU 使用率 PromQL (相对 Limit %)
+    if cpu_query is None:
+        cpu_query = f'sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{{image!=""{namespace_filter}{pod_filter}}}[5m])) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="cpu"{namespace_filter}{pod_filter}}}) * 100'
+
+    # 默认内存使用率 PromQL (相对 Limit %)
+    if memory_query is None:
+        memory_query = f'sum by (pod, namespace) (container_memory_working_set_bytes{{image!=""{namespace_filter}{pod_filter}}}) / on (pod, namespace) group_left sum by (pod, namespace) (kube_pod_container_resource_limits{{resource="memory"{namespace_filter}{pod_filter}}}) * 100'
+
+    # ========== 5. 执行查询 ==========
+    cpu_result = get_aom_prom_metrics_http(region, aom_instance_id, cpu_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+    memory_result = get_aom_prom_metrics_http(region, aom_instance_id, memory_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+
+    # ========== 6. 解析结果 ==========
+    def parse_metric_result(result, metric_name):
+        """解析监控结果，返回时序数据"""
+        if result.get("success") and result.get("result", {}).get("data", {}).get("result"):
+            for item in result["result"]["data"]["result"]:
+                values = item.get("values", [])
+                if values:
+                    time_series = []
+                    for ts, val in values:
+                        try:
+                            time_series.append({
+                                "timestamp": int(ts),
+                                "time": time_module.strftime('%Y-%m-%d %H:%M:%S', time_module.localtime(int(ts))),
+                                "value": round(float(val), 2)
+                            })
+                        except (ValueError, IndexError):
+                            pass
+                    if time_series:
+                        latest_value = time_series[-1]["value"]
+                        return {
+                            metric_name: latest_value,
+                            "status": "critical" if latest_value > 80 else "warning" if latest_value > 50 else "normal",
+                            "time_series": time_series
+                        }
+        return None
+
+    cpu_data = parse_metric_result(cpu_result, "cpu_usage_percent")
+    memory_data = parse_metric_result(memory_result, "memory_usage_percent")
+
+    # ========== 7. 返回结果 ==========
+    return {
+        "success": True,
+        "region": region,
+        "cluster_id": cluster_id,
+        "cluster_name": cluster_name,
+        "pod_name": pod_name,
+        "namespace": pod_info.get("namespace", namespace),
+        "pod_info": pod_info,
+        "aom_instance_id": aom_instance_id,
+        "query_time": time_module.strftime('%Y-%m-%d %H:%M:%S', time_module.localtime()),
+        "query_params": {
+            "hours": hours
+        },
+        "promql": {
+            "cpu": cpu_query,
+            "memory": memory_query
+        },
+        "metrics": {
+            "cpu": cpu_data,
+            "memory": memory_data
+        }
+    }
+
+
+def get_cce_node_metrics_topN(region: str, cluster_id: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, top_n: int = 10, hours: int = 1, cpu_query: str = None, memory_query: str = None, disk_query: str = None) -> Dict[str, Any]:
     """获取 CCE 集群节点监控数据
 
     自动获取 AOM 实例并执行节点 CPU/内存/磁盘监控查询，返回 Top N 数据。
@@ -8287,6 +8432,168 @@ def get_cce_node_metrics(region: str, cluster_id: str, ak: Optional[str] = None,
             "warning_cpu": len([m for m in cpu_metrics if m["status"] == "warning"]),
             "warning_memory": len([m for m in memory_metrics if m["status"] == "warning"]),
             "warning_disk": len([m for m in disk_metrics if m["status"] == "warning"])
+        }
+    }
+
+
+def get_cce_node_metrics(region: str, cluster_id: str, node_ip: str, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None, hours: int = 1, cpu_query: str = None, memory_query: str = None, disk_query: str = None) -> Dict[str, Any]:
+    """获取指定CCE节点的CPU、内存、磁盘使用率监控时序数据
+
+    Args:
+        region: 华为云区域 (如 cn-north-4)
+        cluster_id: CCE 集群 ID
+        node_ip: 节点IP地址
+        ak: Access Key ID (可选)
+        sk: Secret Access Key (可选)
+        project_id: Project ID (可选)
+        hours: 查询时间范围（小时）(默认 1)
+        cpu_query: 自定义 CPU PromQL (可选)
+        memory_query: 自定义内存 PromQL (可选)
+        disk_query: 自定义磁盘 PromQL (可选)
+
+    Returns:
+        Dict with success status and specified node metrics time series data
+    """
+    import time as time_module
+
+    access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Credentials not provided"}
+
+    if not cluster_id or not node_ip:
+        return {"success": False, "error": "cluster_id and node_ip are required"}
+
+    # ========== 1. 获取集群名称 ==========
+    cluster_name = cluster_id
+    try:
+        clusters_result = list_cce_clusters(region, access_key, secret_key, proj_id)
+        if clusters_result.get("success"):
+            for c in clusters_result.get("clusters", []):
+                if c.get("id") == cluster_id:
+                    cluster_name = c.get("name", cluster_id)
+                    break
+    except Exception:
+        pass
+
+    # ========== 2. 获取节点信息 ==========
+    node_info = {}
+    # 从 Kubernetes API 获取节点信息
+    k8s_nodes_result = get_kubernetes_nodes(region, cluster_id, access_key, secret_key, proj_id)
+    if k8s_nodes_result.get("success"):
+        for node in k8s_nodes_result.get("nodes", []):
+            if node.get("ip") == node_ip:
+                node_info = node
+                break
+
+    # 从 CCE API 获取节点规格等信息
+    if not node_info:
+        cce_nodes_result = list_cce_cluster_nodes(region, cluster_id, access_key, secret_key, proj_id)
+        if cce_nodes_result.get("success"):
+            for cce_node in cce_nodes_result.get("nodes", []):
+                cce_node_name = cce_node.get("name", "")
+                if node_ip in cce_node_name or cce_node_name.endswith(node_ip.replace(".", "")):
+                    node_info["cce_name"] = cce_node_name
+                    node_info["id"] = cce_node.get("id", "")
+                    node_info["flavor"] = cce_node.get("flavor", "")
+                    node_info["cce_status"] = cce_node.get("status", "")
+                    break
+
+    # ========== 3. 获取 AOM 实例 ==========
+    aom_instance_id = None
+    aom_instances = list_aom_instances(region, access_key, secret_key, proj_id)
+    cce_instances = []
+    if aom_instances.get("success"):
+        for instance in aom_instances.get("instances", []):
+            if instance.get("type") == "CCE":
+                cce_instances.append(instance)
+
+    # 测试每个 CCE 实例，找到有数据的
+    for instance in cce_instances:
+        test_instance_id = instance.get("id")
+        test_result = get_aom_prom_metrics_http(region, test_instance_id, "up", hours=0.1, ak=access_key, sk=secret_key, project_id=proj_id)
+        if test_result.get("success") and test_result.get("result", {}).get("data", {}).get("result"):
+            aom_instance_id = test_instance_id
+            break
+
+    if not aom_instance_id:
+        return {
+            "success": False,
+            "error": "未找到可用的 AOM 实例",
+            "cluster_id": cluster_id,
+            "cluster_name": cluster_name,
+            "node_ip": node_ip
+        }
+
+    # ========== 4. 构建 PromQL 查询（筛选指定节点IP） ==========
+    # 默认 CPU 使用率 PromQL
+    if cpu_query is None:
+        cpu_query = f"100 - (avg by (instance) (irate(node_cpu_seconds_total{{mode='idle',cluster_name='{cluster_name}',instance=~'{node_ip}.*'}}[5m])) * 100"
+
+    # 默认内存使用率 PromQL
+    if memory_query is None:
+        memory_query = f"avg by (instance) ((1 - node_memory_MemAvailable_bytes{{cluster_name='{cluster_name}',instance=~'{node_ip}.*'}} / node_memory_MemTotal_bytes{{cluster_name='{cluster_name}',instance=~'{node_ip}.*'}})) * 100"
+
+    # 默认磁盘使用率 PromQL
+    if disk_query is None:
+        disk_query = f"avg by (instance) ((1 - node_filesystem_avail_bytes{{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',cluster_name='{cluster_name}',instance=~'{node_ip}.*'}} / node_filesystem_size_bytes{{mountpoint='/',fstype!~'tmpfs|fuse.lxcfs',cluster_name='{cluster_name}',instance=~'{node_ip}.*'}})) * 100"
+
+    # ========== 5. 执行查询 ==========
+    cpu_result = get_aom_prom_metrics_http(region, aom_instance_id, cpu_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+    memory_result = get_aom_prom_metrics_http(region, aom_instance_id, memory_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+    disk_result = get_aom_prom_metrics_http(region, aom_instance_id, disk_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+
+    # ========== 6. 解析结果 ==========
+    def parse_metric_result(result, metric_name):
+        """解析监控结果，返回时序数据"""
+        if result.get("success") and result.get("result", {}).get("data", {}).get("result"):
+            for item in result["result"]["data"]["result"]:
+                values = item.get("values", [])
+                if values:
+                    time_series = []
+                    for ts, val in values:
+                        try:
+                            time_series.append({
+                                "timestamp": int(ts),
+                                "time": time_module.strftime('%Y-%m-%d %H:%M:%S', time_module.localtime(int(ts))),
+                                "value": round(float(val), 2)
+                            })
+                        except (ValueError, IndexError):
+                            pass
+                    if time_series:
+                        latest_value = time_series[-1]["value"]
+                        return {
+                            metric_name: latest_value,
+                            "status": "critical" if latest_value > 80 else "warning" if latest_value > 50 else "normal",
+                            "time_series": time_series
+                        }
+        return None
+
+    cpu_data = parse_metric_result(cpu_result, "cpu_usage_percent")
+    memory_data = parse_metric_result(memory_result, "memory_usage_percent")
+    disk_data = parse_metric_result(disk_result, "disk_usage_percent")
+
+    # ========== 7. 返回结果 ==========
+    return {
+        "success": True,
+        "region": region,
+        "cluster_id": cluster_id,
+        "cluster_name": cluster_name,
+        "node_ip": node_ip,
+        "node_info": node_info,
+        "aom_instance_id": aom_instance_id,
+        "query_time": time_module.strftime('%Y-%m-%d %H:%M:%S', time_module.localtime()),
+        "query_params": {
+            "hours": hours
+        },
+        "promql": {
+            "cpu": cpu_query,
+            "memory": memory_query,
+            "disk": disk_query
+        },
+        "metrics": {
+            "cpu": cpu_data,
+            "memory": memory_data,
+            "disk": disk_data
         }
     }
 
@@ -9175,7 +9482,7 @@ def main():
         check_result, issues = elb_monitoring_inspection(region, cluster_id, aom_instance_id, cluster_name, ak, sk, project_id)
         result = {"success": True, "check": check_result, "issues": issues}
 
-    elif action == "huawei_get_cce_pod_metrics":
+    elif action == "huawei_get_cce_pod_metrics_topN":
         if not region or not cluster_id:
             print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
             sys.exit(1)
@@ -9185,10 +9492,20 @@ def main():
         pod_hours = int(params.get("hours", 1))
         cpu_query = params.get("cpu_query")
         memory_query = params.get("memory_query")
-        pod_node_ip = params.get("node_ip")
-        result = get_cce_pod_metrics(region, cluster_id, ak, sk, project_id, namespace=pod_namespace, label_selector=pod_label_selector, top_n=pod_top_n, hours=pod_hours, cpu_query=cpu_query, memory_query=memory_query, node_ip=pod_node_ip)
+        result = get_cce_pod_metrics_topN(region, cluster_id, ak, sk, project_id, namespace=pod_namespace, label_selector=pod_label_selector, top_n=pod_top_n, hours=pod_hours, cpu_query=cpu_query, memory_query=memory_query)
 
-    elif action == "huawei_get_cce_node_metrics":
+    elif action == "huawei_get_cce_pod_metrics":
+        if not region or not cluster_id or not params.get("pod_name"):
+            print(json.dumps({"success": False, "error": "region, cluster_id and pod_name are required"}))
+            sys.exit(1)
+        pod_name = params.get("pod_name")
+        pod_namespace = params.get("namespace")
+        hours = int(params.get("hours", 1))
+        cpu_query = params.get("cpu_query")
+        memory_query = params.get("memory_query")
+        result = get_cce_pod_metrics(region, cluster_id, pod_name, ak, sk, project_id, namespace=pod_namespace, hours=hours, cpu_query=cpu_query, memory_query=memory_query)
+
+    elif action == "huawei_get_cce_node_metrics_topN":
         if not region or not cluster_id:
             print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
             sys.exit(1)
@@ -9197,7 +9514,18 @@ def main():
         cpu_query = params.get("cpu_query")
         memory_query = params.get("memory_query")
         disk_query = params.get("disk_query")
-        result = get_cce_node_metrics(region, cluster_id, ak, sk, project_id, top_n=node_top_n, hours=node_hours, cpu_query=cpu_query, memory_query=memory_query, disk_query=disk_query)
+        result = get_cce_node_metrics_topN(region, cluster_id, ak, sk, project_id, top_n=node_top_n, hours=node_hours, cpu_query=cpu_query, memory_query=memory_query, disk_query=disk_query)
+
+    elif action == "huawei_get_cce_node_metrics":
+        if not region or not cluster_id or not params.get("node_ip"):
+            print(json.dumps({"success": False, "error": "region, cluster_id and node_ip are required"}))
+            sys.exit(1)
+        node_ip = params.get("node_ip")
+        hours = int(params.get("hours", 1))
+        cpu_query = params.get("cpu_query")
+        memory_query = params.get("memory_query")
+        disk_query = params.get("disk_query")
+        result = get_cce_node_metrics(region, cluster_id, node_ip, ak, sk, project_id, hours=hours, cpu_query=cpu_query, memory_query=memory_query, disk_query=disk_query)
 
     elif action == "huawei_resize_cce_nodepool":
         if not region or not cluster_id or not nodepool_id:
@@ -9406,226 +9734,6 @@ def main():
         time_range = params.get("time_range")
         result = list_aom_current_alarms(region, ak, sk, project_id, event_type, event_severity, time_range, limit)
 
-    # ========== LTS 日志服务工具 ==========
-    elif action == "huawei_get_application_log_stream":
-        # 根据namespace和应用名获取对应的日志组和日志流
-        if not region or not cluster_id:
-            print(json.dumps({"success": False, "error": "region and cluster_id are required"}))
-            sys.exit(1)
-        namespace = params.get("namespace", "default")
-        app_name = params.get("app_name")
-        if not app_name:
-            print(json.dumps({"success": False, "error": "app_name is required"}))
-            sys.exit(1)
-        
-        temp_files = []
-        try:
-            # 步骤1: 获取 LogConfig
-            logconfig_list = []
-            found_match = False
-            matched_logconfig = None
-            default_logconfig = None
-            
-            if K8S_AVAILABLE and SDK_AVAILABLE:
-                try:
-                    # 获取集群证书
-                    cce_client = create_cce_client(region, ak, sk, project_id)
-                    cert_request = CreateKubernetesClusterCertRequest()
-                    cert_request.cluster_id = cluster_id
-                    body = ClusterCertDuration()
-                    body.duration = 1
-                    cert_request.body = body
-                    cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
-                    kubeconfig_data = cert_response.to_dict()
-                    
-                    # 查找外部集群端点
-                    external_cluster = None
-                    for c in kubeconfig_data.get('clusters', []):
-                        if 'external' in c.get('name', '') and 'TLS' not in c.get('name', ''):
-                            external_cluster = c
-                            break
-                    if not external_cluster:
-                        external_cluster = kubeconfig_data.get('clusters', [{}])[0]
-                    
-                    if external_cluster:
-                        # 配置Kubernetes客户端
-                        configuration = k8s_client.Configuration()
-                        configuration.host = external_cluster.get('cluster', {}).get('server')
-                        configuration.verify_ssl = False
-                        
-                        # 写入证书
-                        user_data = None
-                        for u in kubeconfig_data.get('users', []):
-                            if u.get('name') == 'user':
-                                user_data = u.get('user', {})
-                                break
-                        
-                        cert_file = None
-                        key_file = None
-                        if user_data and user_data.get('client_certificate_data'):
-                            cert_file = '/tmp/cce_applog_client.crt'
-                            with open(cert_file, 'wb') as f:
-                                f.write(base64.b64decode(user_data['client_certificate_data']))
-                            configuration.cert_file = cert_file
-                            temp_files.append(cert_file)
-                        
-                        if user_data and user_data.get('client_key_data'):
-                            key_file = '/tmp/cce_applog_client.key'
-                            with open(key_file, 'wb') as f:
-                                f.write(base64.b64decode(user_data['client_key_data']))
-                            configuration.key_file = key_file
-                            temp_files.append(key_file)
-                        
-                        _register_cert_file(cert_file)
-                        _register_cert_file(key_file)
-                        
-                        # 设置默认配置并获取 LogConfig
-                        k8s_client.Configuration.set_default(configuration)
-                        custom_api = k8s_client.CustomObjectsApi()
-                        
-                        cr_combinations = [("logging.openvessel.io", "v1", "logconfigs")]
-                        
-                        for group, version, plural in cr_combinations:
-                            try:
-                                api_result = custom_api.list_cluster_custom_object(
-                                    group=group, version=version, plural=plural
-                                )
-                                
-                                if api_result and 'items' in api_result:
-                                    for item in api_result['items']:
-                                        lc_name = item.get('metadata', {}).get('name')
-                                        lc_namespace = item.get('metadata', {}).get('namespace')
-                                        lc_spec = item.get('spec', {})
-                                        
-                                        logconfig_list.append({
-                                            "name": lc_name,
-                                            "namespace": lc_namespace,
-                                            "spec": lc_spec
-                                        })
-                                        
-                                        # 查找匹配的 LogConfig
-                                        output_detail = lc_spec.get("outputDetail", {})
-                                        lts_output = output_detail.get("LTS", {})
-                                        
-                                        # 优先找精确匹配：namespace 和 应用名都匹配
-                                        input_detail = lc_spec.get("inputDetail", {})
-                                        if input_detail.get("type") == "container_stdout":
-                                            stdout_conf = input_detail.get("containerStdout", {})
-                                            if stdout_conf:
-                                                workloads = stdout_conf.get("workloads", [])
-                                                for wl in workloads:
-                                                    if (wl.get("namespace") == namespace and 
-                                                        wl.get("name") == app_name):
-                                                        matched_logconfig = {
-                                                            "name": lc_name,
-                                                            "namespace": lc_namespace,
-                                                            "spec": lc_spec,
-                                                            "lts_group_id": lts_output.get("ltsGroupID"),
-                                                            "lts_stream_id": lts_output.get("ltsStreamID"),
-                                                            "lts_stream_name": lts_output.get("ltsStreamName"),
-                                                            "match_type": "exact"
-                                                        }
-                                                        found_match = True
-                                                        break
-                                        
-                                        # 找默认的 default-stdout
-                                        if lc_name == "default-stdout":
-                                            default_logconfig = {
-                                                "name": lc_name,
-                                                "namespace": lc_namespace,
-                                                "spec": lc_spec,
-                                                "lts_group_id": lts_output.get("ltsGroupID"),
-                                                "lts_stream_id": lts_output.get("ltsStreamID"),
-                                                "lts_stream_name": lts_output.get("ltsStreamName")
-                                            }
-                                    
-                                    if matched_logconfig:
-                                        break
-                            except Exception:
-                                continue
-                
-                except Exception:
-                    pass
-            
-            # 步骤2: 获取日志组和日志流详情
-            from lts_tools import list_log_groups, list_log_streams
-            
-            lts_groups_result = list_log_groups(region, ak, sk, project_id)
-            group_map = {}
-            
-            if lts_groups_result.get("success"):
-                for group in lts_groups_result.get("log_groups", []):
-                    group_map[group.get("log_group_id")] = group
-            
-            # 步骤3: 决定使用哪个 LogConfig
-            final_logconfig = None
-            use_default = False
-            
-            if found_match and matched_logconfig:
-                final_logconfig = matched_logconfig
-            elif default_logconfig:
-                final_logconfig = default_logconfig
-                use_default = True
-            
-            # 步骤4: 获取对应的日志流详细信息
-            log_group_info = None
-            log_stream_info = None
-            
-            if final_logconfig:
-                target_group_id = final_logconfig.get("lts_group_id")
-                target_stream_id = final_logconfig.get("lts_stream_id")
-                
-                if target_group_id and target_group_id in group_map:
-                    log_group_info = group_map[target_group_id]
-                    
-                    # 获取该日志组下的所有日志流
-                    streams_result = list_log_streams(region, target_group_id, ak, sk, project_id)
-                    if streams_result.get("success"):
-                        for stream in streams_result.get("log_streams", []):
-                            if stream.get("log_stream_id") == target_stream_id:
-                                log_stream_info = stream
-                                break
-            
-            # 清理临时文件
-            for f in temp_files:
-                try:
-                    os.unlink(f)
-                except:
-                    pass
-            
-            # 构建结果
-            result = {
-                "success": True,
-                "cluster_id": cluster_id,
-                "query_namespace": namespace,
-                "query_app_name": app_name,
-                "found_match": found_match,
-                "used_default": use_default,
-                "matched_logconfig": matched_logconfig,
-                "default_logconfig": default_logconfig,
-                "final_logconfig": final_logconfig,
-                "log_group": log_group_info,
-                "log_stream": log_stream_info,
-                "all_logconfigs": logconfig_list,
-                "note": "找到匹配的应用日志配置" if found_match else ("使用默认日志流配置" if use_default else "未找到匹配的配置")
-            }
-            
-            if not final_logconfig:
-                result["success"] = False
-                result["error"] = "未找到匹配的LogConfig，也没有default-stdout"
-        
-        except Exception as e:
-            for f in temp_files:
-                try:
-                    os.unlink(f)
-                except:
-                    pass
-            result = {
-                "success": False,
-                "error": str(e),
-                "error_type": type(e).__name__
-            }
-
     elif action == "huawei_list_log_groups":
         # 查询日志组列表
         if not region:
@@ -9660,11 +9768,19 @@ def main():
         scroll_id = params.get("scroll_id")
         is_desc = params.get("is_desc", "true").lower() == "true"
         is_iterative = params.get("is_iterative", "false").lower() == "true"
+        labels = params.get("labels")
+        if labels and isinstance(labels, str):
+            # 解析JSON格式的labels
+            try:
+                labels = json.loads(labels)
+            except:
+                print(json.dumps({"success": False, "error": "labels参数格式错误，必须是JSON格式的字典，例如 '{\"appName\": \"test\", \"namespace\": \"default\"}'"}))
+                sys.exit(1)
         from lts_tools import query_logs
         result = query_logs(region, log_group_id, log_stream_id, 
-                           start_time, end_time, keywords, query_limit,
-                           scroll_id, is_desc, is_iterative,
-                           ak, sk, project_id)
+                           start_time=start_time, end_time=end_time, keywords=keywords, limit=query_limit,
+                           scroll_id=scroll_id, is_desc=is_desc, is_iterative=is_iterative, labels=labels,
+                           ak=ak, sk=sk, project_id=project_id)
 
 
 
@@ -9834,8 +9950,328 @@ def main():
             sys.exit(1)
         hours = int(params.get("hours", 1))
         query_limit = int(params.get("limit", 1000))
+        labels = params.get("labels")
+        if labels and isinstance(labels, str):
+            # 解析JSON格式的labels
+            try:
+                labels = json.loads(labels)
+            except:
+                print(json.dumps({"success": False, "error": "labels参数格式错误，必须是JSON格式的字典，例如 '{\"appName\": \"test\", \"namespace\": \"default\"}'"}))
+                sys.exit(1)
         from lts_tools import get_recent_logs
-        result = get_recent_logs(region, log_group_id, log_stream_id, hours, query_limit, ak, sk, project_id)
+        result = get_recent_logs(region, log_group_id, log_stream_id, hours, query_limit, labels=labels, ak=ak, sk=sk, project_id=project_id)
+
+    elif action == "huawei_query_application_logs":
+        # ✨ 查询CCE集群应用自定义时间范围日志：自动匹配日志流+自动携带appName/nameSpace标签过滤
+        if not region:
+            print(json.dumps({"success": False, "error": "region为必填参数"}))
+            sys.exit(1)
+        cluster_id = params.get("cluster_id")
+        app_name = params.get("app_name")
+        if not cluster_id or not app_name:
+            print(json.dumps({"success": False, "error": "cluster_id和app_name为必填参数"}))
+            sys.exit(1)
+        namespace = params.get("namespace", "default")
+        start_time = params.get("start_time")
+        end_time = params.get("end_time")
+        query_limit = int(params.get("limit", 1000))
+        keywords = params.get("keywords")
+        labels = params.get("labels")
+        if labels and isinstance(labels, str):
+            # 解析JSON格式的自定义标签
+            try:
+                labels = json.loads(labels)
+            except:
+                print(json.dumps({"success": False, "error": "labels参数格式错误，必须是JSON格式的字典，例如 '{\"app\": \"test\", \"env\": \"prod\"}'"}))
+                sys.exit(1)
+        
+        # 第一步：调用现有工具获取应用对应的日志组和日志流
+        from lts_tools import get_application_log_stream
+        stream_result = get_application_log_stream(
+            region=region,
+            cluster_id=cluster_id,
+            app_name=app_name,
+            namespace=namespace,
+            ak=ak, sk=sk, project_id=project_id
+        )
+        if not stream_result.get("success"):
+            print(json.dumps(stream_result, indent=2, ensure_ascii=False))
+            sys.exit(1)
+        
+        log_group_id = stream_result.get("log_group_id")
+        log_stream_id = stream_result.get("log_stream_id")
+        if not log_group_id or not log_stream_id:
+            print(json.dumps({
+                "success": False,
+                "error": "未找到应用对应的日志组/日志流",
+                "cluster_id": cluster_id,
+                "namespace": namespace,
+                "app_name": app_name
+            }, indent=2, ensure_ascii=False))
+            sys.exit(1)
+        
+        # 第二步：自动添加系统标签（appName和nameSpace），合并用户自定义标签
+        labels = {
+            "appName": app_name,
+            "nameSpace": namespace
+        }
+        
+        # 第三步：调用LTS自定义时间范围查询日志，自动携带appName和nameSpace标签过滤
+        from lts_tools import query_logs
+        # 直接构造华为云LTS要求的字符串格式标签，避免格式转换问题
+        result = query_logs(
+            region=region,
+            log_group_id=log_group_id,
+            log_stream_id=log_stream_id,
+            start_time=start_time,
+            end_time=end_time,
+            keywords=keywords, # 保留用户原始传入的keywords，不做修改
+            limit=query_limit,
+            labels=labels, # 传入字符串格式标签
+            ak=ak, sk=sk, project_id=project_id
+        )
+        
+        # 补充应用上下文信息到结果
+        result["cluster_id"] = cluster_id
+        result["namespace"] = namespace
+        result["app_name"] = app_name
+        result["auto_label_filter"] = auto_labels
+        result["custom_labels"] = labels
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    elif action == "huawei_get_application_log_stream":
+        # ✨ 获取应用对应的日志组/日志流ID（直接调用lts_tools核心匹配逻辑）
+        if not region:
+            print(json.dumps({"success": False, "error": "region为必填参数"}))
+            sys.exit(1)
+        cluster_id = params.get("cluster_id")
+        app_name = params.get("app_name")
+        if not cluster_id or not app_name:
+            print(json.dumps({"success": False, "error": "cluster_id和app_name为必填参数"}))
+            sys.exit(1)
+        namespace = params.get("namespace", "default")
+        
+        # 直接调用lts_tools中的核心匹配函数
+        from lts_tools import get_application_log_stream
+        result = get_application_log_stream(
+            region=region,
+            cluster_id=cluster_id,
+            app_name=app_name,
+            namespace=namespace,
+            ak=ak, sk=sk, project_id=project_id
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        sys.exit(0)
+
+    elif action == "huawei_query_application_recent_logs":
+        # ✨ 一站式查询集群应用最近日志：自动匹配日志流+自动携带appName/nameSpace标签过滤
+        if not region:
+            print(json.dumps({"success": False, "error": "region为必填参数"}))
+            sys.exit(1)
+        cluster_id = params.get("cluster_id")
+        app_name = params.get("app_name")
+        if not cluster_id or not app_name:
+            print(json.dumps({"success": False, "error": "cluster_id和app_name为必填参数"}))
+            sys.exit(1)
+        namespace = params.get("namespace", "default")
+        hours = int(params.get("hours", 1))
+        query_limit = int(params.get("limit", 1000))
+        keywords = params.get("keywords")
+        
+        # 第一步：调用现有工具获取应用对应的日志组和日志流
+        from lts_tools import get_application_log_stream
+        stream_result = get_application_log_stream(
+            region=region,
+            cluster_id=cluster_id,
+            app_name=app_name,
+            namespace=namespace,
+            ak=ak, sk=sk, project_id=project_id
+        )
+        if not stream_result.get("success"):
+            print(json.dumps(stream_result, indent=2, ensure_ascii=False))
+            sys.exit(1)
+        
+        log_group_id = stream_result.get("log_group_id")
+        log_stream_id = stream_result.get("log_stream_id")
+        if not log_group_id or not log_stream_id:
+            print(json.dumps({
+                "success": False,
+                "error": "未找到应用对应的日志组/日志流",
+                "cluster_id": cluster_id,
+                "namespace": namespace,
+                "app_name": app_name
+            }, indent=2, ensure_ascii=False))
+            sys.exit(1)
+        
+        # 第二步：自动构造标签过滤参数（appName和nameSpace）
+        labels = {
+            "appName": app_name,
+            "nameSpace": namespace
+        }
+        
+        # 第三步：调用LTS查询最近日志，自动携带appName和nameSpace标签过滤
+        from lts_tools import get_recent_logs
+        # 直接构造华为云LTS要求的字符串格式标签，避免格式转换问题
+        #labels_str = f"appName={app_name},nameSpace={namespace}"
+        result = get_recent_logs(
+            region=region,
+            log_group_id=log_group_id,
+            log_stream_id=log_stream_id,
+            hours=hours,
+            limit=query_limit,
+            keywords=keywords, # 保留用户原始传入的keywords，不做修改
+            labels=labels, # 传入字符串格式标签
+            ak=ak, sk=sk, project_id=project_id
+        )
+        
+        # 补充应用上下文信息到结果
+        result["cluster_id"] = cluster_id
+        result["namespace"] = namespace
+        result["app_name"] = app_name
+        result["auto_label_filter"] = labels
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    elif action == "huawei_list_cce_daemonsets":
+        # ✨ 查询CCE集群内所有DaemonSet守护进程集信息
+        if not region or not cluster_id:
+            print(json.dumps({"success": False, "error": "region和cluster_id为必填参数"}))
+            sys.exit(1)
+        namespace = params.get("namespace")
+        
+        # 检查依赖
+        try:
+            import kubernetes
+            from kubernetes import client
+        except ImportError as e:
+            print(json.dumps({"success": False, "error": f"Kubernetes SDK未安装: {str(e)}"}))
+            sys.exit(1)
+        
+        # 重新获取凭证确保不为空
+        ak, sk, project_id = get_credentials(ak, sk, project_id)
+        if not ak or not sk:
+            print(json.dumps({"success": False, "error": "AK/SK未配置，请通过环境变量或参数传入"}))
+            sys.exit(1)
+        
+        import base64
+        import tempfile
+        import os
+        
+        temp_files = []
+        try:
+            # 1. 获取集群kubeconfig
+            from huaweicloudsdkcce.v3 import CceClient
+            from huaweicloudsdkcce.v3.region.cce_region import CceRegion
+            from huaweicloudsdkcce.v3.model.create_kubernetes_cluster_cert_request import CreateKubernetesClusterCertRequest
+            from huaweicloudsdkcce.v3.model.cluster_cert_duration import ClusterCertDuration
+            
+            # 创建CCE客户端
+            credentials = BasicCredentials(ak, sk, project_id)
+            cce_client = CceClient.new_builder() \
+                .with_credentials(credentials) \
+                .with_region(getattr(CceRegion, region.upper().replace("-", "_"))) \
+                .build()
+            
+            # 获取集群证书
+            cert_request = CreateKubernetesClusterCertRequest()
+            cert_request.cluster_id = cluster_id
+            body = ClusterCertDuration()
+            body.duration = 1
+            cert_request.body = body
+            cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
+            kubeconfig_data = cert_response.to_dict()
+            
+            # 查找外部集群端点
+            external_cluster = None
+            for c in kubeconfig_data.get('clusters', []):
+                if 'external' in c.get('name', '') and 'TLS' not in c.get('name', ''):
+                    external_cluster = c
+                    break
+            if not external_cluster:
+                external_cluster = kubeconfig_data.get('clusters', [{}])[0]
+            if not external_cluster:
+                print(json.dumps({"success": False, "error": "无法获取集群API端点"}))
+                sys.exit(1)
+            
+            # 配置Kubernetes客户端
+            configuration = kubernetes.client.Configuration()
+            configuration.host = external_cluster.get('cluster', {}).get('server')
+            configuration.verify_ssl = False
+            
+            # 写入证书
+            user_data = None
+            for u in kubeconfig_data.get('users', []):
+                if u.get('name') == 'user':
+                    user_data = u.get('user', {})
+                    break
+            
+            if user_data and user_data.get('client_certificate_data'):
+                cert_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.crt', delete=False)
+                cert_file.write(base64.b64decode(user_data['client_certificate_data']))
+                cert_file.close()
+                configuration.cert_file = cert_file.name
+                temp_files.append(cert_file.name)
+            
+            if user_data and user_data.get('client_key_data'):
+                key_file = tempfile.NamedTemporaryFile(mode='wb', suffix='.key', delete=False)
+                key_file.write(base64.b64decode(user_data['client_key_data']))
+                key_file.close()
+                configuration.key_file = key_file.name
+                temp_files.append(key_file.name)
+            
+            # 初始化客户端
+            kubernetes.client.Configuration.set_default(configuration)
+            apps_v1_api = client.AppsV1Api()
+            
+            # 查询DaemonSet
+            daemonsets = []
+            if namespace:
+                resp = apps_v1_api.list_namespaced_daemon_set(namespace=namespace)
+            else:
+                resp = apps_v1_api.list_daemon_set_for_all_namespaces()
+            
+            for ds in resp.items:
+                ds_info = {
+                    "name": ds.metadata.name,
+                    "namespace": ds.metadata.namespace,
+                    "desired_replicas": ds.status.desired_number_scheduled,
+                    "current_replicas": ds.status.current_number_scheduled,
+                    "ready_replicas": ds.status.number_ready,
+                    "available_replicas": ds.status.number_available,
+                    "updated_replicas": ds.status.updated_number_scheduled,
+                    "age": str((datetime.now() - ds.metadata.creation_timestamp.replace(tzinfo=None))).split('.')[0],
+                    "images": [c.image for c in ds.spec.template.spec.containers]
+                }
+                daemonsets.append(ds_info)
+            
+            # 清理临时文件
+            for f in temp_files:
+                try:
+                    os.unlink(f)
+                except:
+                    pass
+            
+            print(json.dumps({
+                "success": True,
+                "region": region,
+                "cluster_id": cluster_id,
+                "count": len(daemonsets),
+                "daemonsets": daemonsets
+            }, indent=2, ensure_ascii=False))
+            sys.exit(0)
+            
+        except Exception as e:
+            # 清理临时文件
+            for f in temp_files:
+                try:
+                    os.unlink(f)
+                except:
+                    pass
+            print(json.dumps({
+                "success": False,
+                "error": str(e),
+                "error_type": type(e).__name__
+            }, indent=2, ensure_ascii=False))
+            sys.exit(0)
 
     elif action == "huawei_network_diagnose":
         # 网络问题诊断 - 按工作负载
