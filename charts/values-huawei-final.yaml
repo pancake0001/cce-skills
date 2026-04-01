@@ -25,7 +25,7 @@ sandbox:
   # SSH sandbox image (on SWR - built with dropbear)
   image:
     repository: swr.cn-north-4.myhuaweicloud.com/pancake/openclaw-sandbox
-    tag: "2026.03.28-openssh-v5"
+    tag: "2026.03.28-openssh-v10"
     pullPolicy: IfNotPresent
 
   # Shared workspace PVC (requires ReadWriteMany)
@@ -116,6 +116,10 @@ openclaw:
 
     # Agent definitions
     list:
+      - id: main
+        workspace: ~/.openclaw/workspace-main
+        tools:
+          allow: ["*"]
       - id: alice
         workspace: ~/.openclaw/workspace-alice
         sandbox:
@@ -134,7 +138,7 @@ openclaw:
           enabled: true
           backend: ssh
           scope: agent
-          workspaceAccess: ro
+          workspaceAccess: rw
           ssh:
             target: "openclaw-sandbox-bob"
             workspaceRoot: /home/openclaw/workspace

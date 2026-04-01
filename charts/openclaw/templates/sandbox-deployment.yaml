@@ -99,9 +99,14 @@ spec:
                 name: {{ .envSecretRef }}
           {{- end }}
           command:
-            - /usr/sbin/sshd
-            - -D
-            - -e
+            - /bin/bash
+            - -c
+            - |
+              # Persist envFrom-injected vars (HUAWEI_AK/SK etc.) to /etc/environment
+              # so PAM (pam_env) can inject them into SSH login sessions
+              env | grep -v "^(HOME|USER|SHELL|PATH|LOGNAME|MAIL|SSH|TERM|SHLVL|XDG|PWD)=" > /etc/environment
+              env | grep "^HUAWEI_" >> /etc/environment 2>/dev/null || true
+              exec /usr/sbin/sshd -D -e
           securityContext:
             runAsUser: 0
             runAsNonRoot: false

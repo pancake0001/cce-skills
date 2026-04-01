@@ -23,7 +23,7 @@
           },
           "ak": {
             "type": "string",
-            "description": "Access Key ID (optional if HUAWEI_AK env is set)"
+            "description": "Access Key ID (optional if  env is set)"
           },
           "sk": {
             "type": "string",
