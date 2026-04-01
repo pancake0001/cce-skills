@@ -2552,6 +2552,10 @@
             "type": "integer",
             "description": "返回条数 (默认100)"
           },
+          "labels": {
+            "type": "string",
+            "description": "标签过滤，JSON字典格式 (e.g., '{\"appName\": \"test\", \"namespace\": \"default\"}')"
+          },
           "ak": {
             "type": "string",
             "description": "Access Key ID (可选，如已设置 HUAWEI_AK 环境变量)"
@@ -2572,6 +2576,519 @@
         ]
       },
       "script": "scripts/lts_tools.py"
+    },
+    {
+      "name": "huawei_query_application_logs",
+      "description": "查询CCE集群中应用自定义时间范围的日志信息，自动匹配日志流、自动携带标签过滤。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域 (e.g., cn-north-4)"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "app_name": {
+            "type": "string",
+            "description": "应用/工作负载名称"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "命名空间 (默认: default)"
+          },
+          "start_time": {
+            "type": "string",
+            "description": "查询开始时间，格式: YYYY-MM-DD HH:MM:SS (默认: 1小时前)"
+          },
+          "end_time": {
+            "type": "string",
+            "description": "查询结束时间，格式同上 (默认: 当前时间)"
+          },
+          "keywords": {
+            "type": "string",
+            "description": "日志关键词过滤"
+          },
+          "labels": {
+            "type": "string",
+            "description": "自定义过滤标签，JSON字典格式 (e.g., '{\"env\": \"prod\", \"version\": \"v1\"}')"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "返回日志条数 (默认: 1000)"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选，如已设置HUAWEI_AK环境变量)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选，如已设置HUAWEI_SK环境变量)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选，如已设置HUAWEI_PROJECT_ID环境变量)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id",
+          "app_name"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_query_application_recent_logs",
+      "description": "CCE集群应用日志快捷查询，查询最近N小时日志，自动匹配日志流、自动携带标签过滤，无需手动查找日志ID。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域 (e.g., cn-north-4)"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "app_name": {
+            "type": "string",
+            "description": "应用/工作负载名称"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "命名空间 (默认: default)"
+          },
+          "hours": {
+            "type": "integer",
+            "description": "查询最近几小时 (默认: 1)"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "返回日志条数 (默认: 1000)"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选，如已设置HUAWEI_AK环境变量)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选，如已设置HUAWEI_SK环境变量)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选，如已设置HUAWEI_PROJECT_ID环境变量)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id",
+          "app_name"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_cce_cluster_inspection_subagent_legacy",
+      "description": "旧版Subagent分布式并行CCE集群巡检。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_get_cce_ingresses",
+      "description": "查询CCE集群内Ingress路由列表。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "命名空间（可选，默认查询所有）"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_get_cce_node_metrics_topN",
+      "description": "获取CCE集群节点CPU/内存/磁盘使用率Top N排名。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "top_n": {
+            "type": "integer",
+            "description": "返回Top N节点，默认10"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_get_cce_node_metrics",
+      "description": "获取指定CCE节点的CPU、内存、磁盘使用率过去一段时间的时序监控数据。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "node_ip": {
+            "type": "string",
+            "description": "节点IP地址"
+          },
+          "hours": {
+            "type": "integer",
+            "description": "查询时间范围（小时），默认1小时"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id",
+          "node_ip"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_get_cce_nodes",
+      "description": "获取CCE集群指定节点详细信息。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "node_name": {
+            "type": "string",
+            "description": "节点名称（可选，默认查询所有节点）"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_get_cce_pod_metrics_topN",
+      "description": "获取CCE集群Pod CPU/内存使用率Top N排名。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "命名空间（可选，默认查询所有）"
+          },
+          "top_n": {
+            "type": "integer",
+            "description": "返回Top N Pod，默认10"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_get_cce_pod_metrics",
+      "description": "获取指定CCE Pod的CPU、内存使用率过去一段时间的时序监控数据。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "pod_name": {
+            "type": "string",
+            "description": "Pod名称"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "命名空间（可选，默认查询所有）"
+          },
+          "hours": {
+            "type": "integer",
+            "description": "查询时间范围（小时），默认1小时"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id",
+          "pod_name"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_get_cce_services",
+      "description": "查询CCE集群Service服务列表。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "命名空间（可选，默认查询所有）"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_list_cce_daemonsets",
+      "description": "查询CCE集群内所有DaemonSet守护进程集信息（含副本数、状态、镜像）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "命名空间（可选，默认查询所有）"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_get_application_log_stream",
+      "description": "根据CCE集群ID、应用名、命名空间自动匹配对应的日志组和日志流ID，基于LogConfig规则匹配。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "app_name": {
+            "type": "string",
+            "description": "应用/工作负载名称"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "命名空间 (默认: default)"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id",
+          "app_name"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
     }
   ]
 }

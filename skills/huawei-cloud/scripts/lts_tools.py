@@ -209,6 +209,7 @@ def query_logs(region: str, log_group_id: str, log_stream_id: str,
                keywords: str = None, limit: int = 1000,
                scroll_id: str = None, is_desc: bool = True,
                is_iterative: bool = False,
+               labels: Optional[Dict[str, str]] = None,
                ak: str = None, sk: str = None, 
                project_id: str = None) -> Dict[str, Any]:
     """
@@ -270,6 +271,10 @@ def query_logs(region: str, log_group_id: str, log_stream_id: str,
         
         if keywords:
             query_params.keywords = keywords
+        
+        if labels:
+            # 支持字符串格式和字典格式两种labels输入
+            query_params.labels = labels
         
         if scroll_id:
             query_params.scroll_id = scroll_id
@@ -340,6 +345,121 @@ def query_logs_by_keywords(region: str, log_group_id: str, log_stream_id: str,
 
 
 # ========== CCE集群日志 ==========
+
+def get_application_log_stream(region: str, cluster_id: str, app_name: str = None, namespace: str = None, ak: str = None, sk: str = None, project_id: str = None) -> Dict[str, Any]:
+    """
+    根据CCE集群ID、应用名、命名空间获取对应的日志组和日志流
+    匹配规则优先级（全部基于LogConfig CRD匹配，不直接查询LTS）：
+    1. 优先精确匹配：LogConfig中namespace和应用名完全匹配的container_stdout采集规则
+    2. 次选匹配：LogConfig中命名空间匹配，且spec.containerStdout.allContainers = true的全局采集规则
+    3. 兜底匹配：集群中name为default-stdout的全局默认日志采集规则
+    """
+    try:
+        # 查询集群所有LogConfig自定义采集规则
+        logconfig_result = get_cce_logconfigs(region, cluster_id, ak, sk, project_id)
+        if not logconfig_result.get("success"):
+            return logconfig_result
+        
+        logconfigs = logconfig_result.get("logconfigs", [])
+        if not logconfigs:
+            return {
+                "success": False,
+                "error": "集群中未找到任何LogConfig采集规则",
+                "note": "请先配置日志采集规则或确认日志采集组件已安装"
+            }
+        
+        match_type = None
+        matched_config = None
+        
+        # 规则1：优先精确匹配namespace + 应用名
+        for lc in logconfigs:
+            try:
+                # 只匹配container_stdout类型的采集规则
+                if lc.get("spec", {}).get("inputDetail", {}).get("type") != "container_stdout":
+                    continue
+                
+                # 遍历workloads列表，查找完全匹配的
+                workloads = lc.get("spec", {}).get("inputDetail", {}).get("containerStdout", {}).get("workloads", [])
+                for workload in workloads:
+                    if workload.get("namespace") == namespace and workload.get("name") == app_name:
+                        matched_config = lc
+                        match_type = "精确匹配应用LogConfig"
+                        break
+                if matched_config:
+                    break
+            except:
+                continue
+        
+        # 规则2：没找到精确匹配，找同namespace下allContainers=true的全局采集规则
+        if not matched_config:
+            for lc in logconfigs:
+                try:
+                    if lc.get("spec", {}).get("inputDetail", {}).get("type") != "container_stdout":
+                        continue
+                    # 检查命名空间匹配+全容器采集开启
+                    if lc.get("namespace") == namespace and lc.get("spec", {}).get("inputDetail", {}).get("containerStdout", {}).get("allContainers") == True:
+                        matched_config = lc
+                        match_type = "命名空间全局LogConfig匹配"
+                        break
+                except:
+                    continue
+        
+        # 规则3：都没找到，匹配name=default-stdout的全局默认采集规则
+        if not matched_config:
+            for lc in logconfigs:
+                try:
+                    if lc.get("name") == "default-stdout" and lc.get("spec", {}).get("inputDetail", {}).get("type") == "container_stdout":
+                        matched_config = lc
+                        match_type = "默认default-stdout LogConfig匹配"
+                        break
+                except:
+                    continue
+        
+        # 全部匹配失败，返回错误
+        if not matched_config:
+            return {
+                "success": False,
+                "error": "未匹配到任何日志采集规则",
+                "note": "请检查应用是否配置了LogConfig采集规则，或集群是否存在default-stdout默认采集规则"
+            }
+        
+        # 从匹配到的LogConfig中提取日志组/流ID
+        try:
+            lts_config = matched_config.get("spec", {}).get("outputDetail", {}).get("LTS", {})
+            log_group_id = lts_config.get("ltsGroupID")
+            log_stream_id = lts_config.get("ltsStreamID")
+            
+            if not log_group_id or not log_stream_id:
+                return {
+                    "success": False,
+                    "error": "匹配到的LogConfig中未配置LTS日志存储信息",
+                    "logconfig_name": matched_config.get("name")
+                }
+            
+            return {
+                "success": True,
+                "cluster_id": cluster_id,
+                "app_name": app_name,
+                "namespace": namespace,
+                "log_group_id": log_group_id,
+                "log_stream_id": log_stream_id,
+                "match_type": match_type,
+                "logconfig_name": matched_config.get("name"),
+                "note": f"通过{match_type}获取日志流"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"解析LogConfig配置失败: {str(e)}",
+                "logconfig_name": matched_config.get("name")
+            }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
 
 def get_cce_logconfigs(region: str, cluster_id: str, ak: str = None,
                        sk: str = None, project_id: str = None,
@@ -730,6 +850,8 @@ def query_aom_logs(region: str, cluster_id: str, namespace: str = None,
 
 def get_recent_logs(region: str, log_group_id: str, log_stream_id: str,
                     hours: int = 1, limit: int = 1000,
+                    keywords: str = None,
+                    labels: Optional[Dict[str, str]] = None,
                     ak: str = None, sk: str = None,
                     project_id: str = None) -> Dict[str, Any]:
     """
@@ -747,8 +869,13 @@ def get_recent_logs(region: str, log_group_id: str, log_stream_id: str,
         region, log_group_id, log_stream_id,
         start_time.strftime('%Y-%m-%d %H:%M:%S'),
         end_time.strftime('%Y-%m-%d %H:%M:%S'),
-        None, limit, None, True, False,
-        ak, sk, project_id
+        keywords=keywords,
+        limit=limit,
+        scroll_id=None,
+        is_desc=True,
+        is_iterative=False,
+        labels=labels,
+        ak=ak, sk=sk, project_id=project_id
     )
 
 
