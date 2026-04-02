@@ -236,6 +236,60 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_aggregate_inspection_results` | 结果汇总 | 汇总Subagent巡检结果 |
 | `huawei_export_inspection_report` | 报告生成 | 导出HTML格式完整巡检报告 |
 
+#### 工作负载异常诊断
+
+| 工具 | 功能 | 诊断对象 |
+|------|------|----------|
+| `huawei_workload_diagnose` | 工作负载异常诊断 | 指定工作负载或命名空间 |
+| `huawei_workload_diagnose_by_alarm` | 基于告警的诊断 | 告警触发的工作负载 |
+| `huawei_verify_workload` | 恢复操作后验证 | 检查工作负载恢复状态 |
+| `huawei_scale_workload` | 扩缩容工作负载 | 需二次确认 |
+| `huawei_expand_nodepool` | 扩容节点池 | 需二次确认 |
+
+**功能说明：**
+
+- **huawei_workload_diagnose**: 工作负载异常综合诊断工具，支持：
+  - 直接指定工作负载名称进行诊断
+  - 不指定工作负载时，诊断整个命名空间下的所有工作负载
+  - 收集工作负载基础信息（副本数、Pod状态、异常比例）
+  - 诊断异常Pod（参考CCE_Workload_Troubleshooting_Guide.md）
+  - 预留节点诊断和网络诊断接口
+  - 检查变更信息，进行关联性分析
+  - 生成综合分析报告
+
+- **huawei_workload_diagnose_by_alarm**: 基于告警触发诊断
+  - 自动解析告警JSON中的工作负载信息
+  - 自动提取故障时间点进行关联分析
+  - 支持直接传入告警名称
+
+**诊断流程（近1小时数据）：**
+
+1. **收集工作负载信息** - 工作负载名称、namespace、副本数、Pod状态、异常比例
+2. **异常Pod诊断** - 挑选最多3个异常Pod进行诊断，参考CCE_Workload_Troubleshooting_Guide.md
+3. **节点诊断** - 调用节点诊断工具分析工作负载所在节点
+4. **网络链路分析** - 调用网络诊断工具分析Service/Ingress/ELB/EIP链路
+5. **变更关联分析** - 对比故障时间点与工作负载变更时间
+
+**操作步骤：**
+
+1. 如需扩容工作负载实例 → 调用 `huawei_scale_workload`
+2. 如节点资源不足 → 调用 `huawei_expand_nodepool` 扩容节点池
+3. 等待10分钟后 → 调用 `huawei_verify_workload` 验证恢复状态
+
+**输出报告包含：**
+- 工作负载基本信息（Deployment/StatefulSet、Pod、节点、Service、Ingress、ELB、NAT、EIP）
+- 异常Pod分析（状态、事件、日志）
+- 节点诊断结果汇总
+- 网络链路诊断结果汇总
+- 变更关联分析
+- Top3根因分析
+- 恢复操作及结果（如有执行）
+
+**参考文档：**
+- [CCE工作负载异常排查指南](./references/CCE_Workload_Troubleshooting_Guide.md)
+
+---
+
 #### 网络问题诊断
 
 | 工具 | 功能 | 诊断对象 |
@@ -435,4 +489,4 @@ python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 
 ## References
 - [CCE安全组配置说明](./references/CCE_Security_Group_Configuration.md)
-- [CCE节点故障检测策略配置指南](./references/CCE节点故障检测策略配置指南.md)
+- [CCE节点故障检测策略配置指南](./references/CCE_Node_Fault_Detection_Configuration.md)
