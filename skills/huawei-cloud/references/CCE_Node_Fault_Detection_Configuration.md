@@ -1,4 +1,4 @@
-# 配置节点故障检测策略
+# 配置节点故障检测策略 / Configure Node Fault Detection Policy
 **更新时间：2026-03-30 GMT+08:00**
 **来源：华为云官方文档 https://support.huaweicloud.com/usermanual-cce/cce_10_0659.html**
 

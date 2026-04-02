@@ -268,17 +268,29 @@ def get_service_chain(workload_name: str, namespace: str, region: str, cluster_i
                     }
                     break
     
-    # 检查NAT网关（简化：如果VPC有NAT）
-    nat_result = list_nat_gateways(region, ak, sk, project_id)
-    if nat_result.get("success") and nat_result.get("nat_gateways"):
-        chain["nat"] = {
-            "count": len(nat_result.get("nat_gateways", [])),
-            "gateways": [{
-                "id": nat.get("id"),
-                "name": nat.get("name"),
-                "status": nat.get("status")
-            } for nat in nat_result.get("nat_gateways", [])[:3]]
-        }
+    # 检查NAT网关 - 需要关联到工作负载所在VPC
+    # 简化处理：如果有通过ELB/NLB的LoadBalancer服务，才需要关心NAT
+    # ClusterIP类型不需要NAT
+    if chain.get("service") and chain["service"].get("type") == "LoadBalancer":
+        # 通过ELB访问时，检查该VPC是否有NAT（用于ELB的后端通信）
+        nat_result = list_nat_gateways(region, ak, sk, project_id)
+        if nat_result.get("success") and nat_result.get("nat_gateways"):
+            # 简化：对于CCE集群，通常使用ENI或NAT通过ELB访问
+            # 这里只标记有NAT网关存在，不一定与该工作负载直接相关
+            chain["nat"] = {
+                "count": len(nat_result.get("nat_gateways", [])),
+                "note": "NAT网关存在，但无法确定是否与该工作负载直接关联",
+                "gateways": [{
+                    "id": nat.get("id"),
+                    "name": nat.get("name"),
+                    "status": nat.get("status")
+                } for nat in nat_result.get("nat_gateways", [])[:3]]
+            }
+        else:
+            chain["nat"] = None
+    else:
+        # ClusterIP服务不需要NAT
+        chain["nat"] = None
     
     return chain
 
