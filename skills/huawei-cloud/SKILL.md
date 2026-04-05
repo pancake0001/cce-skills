@@ -1,6 +1,6 @@
 # huawei-cloud
 
-Query Huawei Cloud resources and monitoring data via SDK.
+你是一个运维专家，负责运维华为云上的资源和服务，特别是CCE集群及部署在集群中的服务
 
 ## 安全约束 (Security Constraints)
 
@@ -105,6 +105,8 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 |------|------|
 | `huawei_list_ecs` | 查询区域内所有ECS实例列表 |
 | `huawei_get_ecs_metrics` | 获取指定ECS实例的监控数据（CPU/内存/磁盘/网络） |
+| `huawei_stop_ecs_instance` | 关闭（关机）ECS实例（需 confirm=true） |
+| `huawei_start_ecs_instance` | 启动（开机）ECS实例 |
 | `huawei_list_flavors` | 查询区域内可用的ECS实例规格 |
 
 **参数说明：**
@@ -137,6 +139,7 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_list_security_groups` | 查询安全组列表（可按VPC过滤） |
 | `huawei_list_vpc_acls` | 查询VPC网络ACL列表 |
 | `huawei_list_nat` | 查询NAT网关列表 |
+| `huawei_get_nat_gateway_metrics` | 获取指定NAT网关的监控指标（带宽、连接数、丢包率、新建连接速率等） |
 
 ---
 
@@ -155,7 +158,7 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 |------|------|
 | `huawei_list_elb` | 查询区域内所有ELB负载均衡器列表 |
 | `huawei_list_elb_listeners` | 查询指定负载均衡器的监听器列表 |
-| `huawei_get_elb_metrics` | 获取指定ELB的监控数据（连接数、吞吐量） |
+| `huawei_get_elb_metrics` | 获取ELB弹性负载均衡的监控指标（带宽、连接数、QPS、状态码、响应时间等） |
 
 ---
 
@@ -192,12 +195,14 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_resize_cce_nodepool` | 调整节点池节点数量（扩缩容） |
 | `huawei_delete_cce_node` | 从集群删除指定节点 |
 | `huawei_delete_cce_cluster` | 删除整个CCE集群 |
+| `huawei_hibernate_cce_cluster` | 休眠CCE集群（停止计费、保留配置） |
+| `huawei_awake_cce_cluster` | 唤醒休眠的CCE集群 |
 
 #### 工作负载与资源
 
 | 工具 | 功能 |
 |------|------|
-| `huawei_get_cce_pods` | 查询集群内Pod列表 |
+| `huawei_get_cce_pods` | 查询集群内Pod列表（支持 labels 过滤） |
 | `huawei_get_cce_deployments` | 查询集群内Deployment列表 |
 | `huawei_scale_cce_workload` | 扩缩容Deployment/StatefulSet工作负载副本数 |
 | `huawei_get_cce_services` | 查询集群内Service列表 |
@@ -206,6 +211,11 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_get_cce_pvcs` | 查询PVC列表 |
 | `huawei_get_cce_pvs` | 查询PV列表 |
 | `huawei_delete_cce_workload` | 删除工作负载（Deployment/StatefulSet） |
+| `huawei_list_cce_configmaps` | 查询集群ConfigMap列表 |
+| `huawei_list_cce_secrets` | 查询集群Secret列表 |
+| `huawei_list_cce_daemonsets` | 查询集群内DaemonSet守护进程集信息（含副本数、状态、镜像） |
+| `huawei_list_cce_statefulsets` | 查询集群内StatefulSet有状态服务信息（含副本数、状态、镜像、存储卷） |
+| `huawei_list_cce_cronjobs` | 查询集群内CronJob定时任务信息（含调度计划、并发策略、运行状态） |
 
 #### 监控分析
 
@@ -225,6 +235,38 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_query_application_logs` | 查询CCE集群中应用自定义时间范围的日志信息，自动匹配日志流、自动携带标签过滤 |
 | `huawei_query_application_recent_logs` | CCE集群应用日志快捷查询，查询最近N小时日志，自动匹配日志流、自动携带标签过滤，无需手动查找日志ID |
 
+#### Pod 日志查询
+
+| 工具 | 功能 |
+|------|------|
+| `huawei_get_pod_logs` | 获取 Pod 容器日志（模拟 kubectl logs） |
+
+**参数说明：**
+- `region` (required): 华为云区域
+- `cluster_id` (required): CCE 集群 ID
+- `pod_name` (required): Pod 名称
+- `namespace` (optional): 命名空间，默认 "default"
+- `container` (optional): 容器名，不指定则返回第一个容器
+- `previous` (optional): 是否获取上一个已终止容器的日志，默认 false
+- `tail_lines` (optional): 返回最近 N 行，默认 100
+
+**使用示例：**
+```bash
+# 获取 nginx pod 的最近 100 行日志
+python3 huawei-cloud.py huawei_get_pod_logs \
+  region=cn-north-4 \
+  cluster_id=034b98c7-1c4d-11f1-842d-0255ac100249 \
+  pod_name=nginx-7fb96c846b-abc123 \
+  namespace=default
+
+# 获取上一个容器的日志
+python3 huawei-cloud.py huawei_get_pod_logs \
+  region=cn-north-4 \
+  cluster_id=xxx \
+  pod_name=nginx-abc123 \
+  previous=true
+```
+
 #### 集群巡检
 
 | 工具 | 模式 | 功能 |
@@ -232,63 +274,20 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_cce_cluster_inspection` | 串行 | 执行CCE集群完整巡检（8项检查） |
 | `huawei_cce_cluster_inspection_parallel` | 并行 ⚡ | 多线程并行巡检，速度提升3-5倍 |
 | `huawei_cce_cluster_inspection_subagent` | Subagent 🚀 | Subagent分布式并行巡检 |
-| `huawei_cce_cluster_inspection_subagent_legacy` | Subagent (legacy) | 旧版Subagent分布式并行巡检 |
 | `huawei_aggregate_inspection_results` | 结果汇总 | 汇总Subagent巡检结果 |
 | `huawei_export_inspection_report` | 报告生成 | 导出HTML格式完整巡检报告 |
 
-#### 工作负载异常诊断
-
-| 工具 | 功能 | 诊断对象 |
-|------|------|----------|
-| `huawei_workload_diagnose` | 工作负载异常诊断 | 指定工作负载或命名空间 |
-| `huawei_workload_diagnose_by_alarm` | 基于告警的诊断 | 告警触发的工作负载 |
-| `huawei_verify_workload` | 恢复操作后验证 | 检查工作负载恢复状态 |
-| `huawei_scale_workload` | 扩缩容工作负载 | 需二次确认 |
-| `huawei_expand_nodepool` | 扩容节点池 | 需二次确认 |
-
-**功能说明：**
-
-- **huawei_workload_diagnose**: 工作负载异常综合诊断工具，支持：
-  - 直接指定工作负载名称进行诊断
-  - 不指定工作负载时，诊断整个命名空间下的所有工作负载
-  - 收集工作负载基础信息（副本数、Pod状态、异常比例）
-  - 诊断异常Pod（参考CCE_Workload_Troubleshooting_Guide.md）
-  - 预留节点诊断和网络诊断接口
-  - 检查变更信息，进行关联性分析
-  - 生成综合分析报告
-
-- **huawei_workload_diagnose_by_alarm**: 基于告警触发诊断
-  - 自动解析告警JSON中的工作负载信息
-  - 自动提取故障时间点进行关联分析
-  - 支持直接传入告警名称
-
-**诊断流程（近1小时数据）：**
-
-1. **收集工作负载信息** - 工作负载名称、namespace、副本数、Pod状态、异常比例
-2. **异常Pod诊断** - 挑选最多3个异常Pod进行诊断，参考CCE_Workload_Troubleshooting_Guide.md
-3. **节点诊断** - 调用节点诊断工具分析工作负载所在节点
-4. **网络链路分析** - 调用网络诊断工具分析Service/Ingress/ELB/EIP链路
-5. **变更关联分析** - 对比故障时间点与工作负载变更时间
-
-**操作步骤：**
-
-1. 如需扩容工作负载实例 → 调用 `huawei_scale_workload`
-2. 如节点资源不足 → 调用 `huawei_expand_nodepool` 扩容节点池
-3. 等待10分钟后 → 调用 `huawei_verify_workload` 验证恢复状态
-
-**输出报告包含：**
-- 工作负载基本信息（Deployment/StatefulSet、Pod、节点、Service、Ingress、ELB、NAT、EIP）
-- 异常Pod分析（状态、事件、日志）
-- 节点诊断结果汇总
-- 网络链路诊断结果汇总
-- 变更关联分析
-- Top3根因分析
-- 恢复操作及结果（如有执行）
-
-**参考文档：**
-- [CCE工作负载异常排查指南](./references/CCE_Workload_Troubleshooting_Guide.md)
-
----
+**8大检查项（可独立调用）：**
+| 工具 | 功能 |
+|------|------|
+| `huawei_pod_status_inspection` | Pod状态巡检（异常状态、容器重启次数） |
+| `huawei_addon_pod_monitoring_inspection` | 系统插件Pod监控（kube-system/monitoring） |
+| `huawei_biz_pod_monitoring_inspection` | 业务Pod监控 |
+| `huawei_node_status_inspection` | Node状态巡检（节点健康度） |
+| `huawei_node_resource_inspection` | 节点资源使用率巡检 |
+| `huawei_event_inspection` | 集群关键事件巡检 |
+| `huawei_aom_alarm_inspection` | AOM活跃告警巡检 |
+| `huawei_elb_monitoring_inspection` | ELB负载均衡监控巡检 |
 
 #### 网络问题诊断
 
@@ -296,7 +295,6 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 |------|------|----------|
 | `huawei_network_diagnose` | 工作负载网络问题诊断 | 指定工作负载 |
 | `huawei_network_diagnose_by_alarm` | 基于告警的网络问题诊断 | 触发告警的工作负载 |
-| `huawei_network_scale_workload` | 扩缩容工作负载 | 需二次确认 |
 
 **诊断流程（近1小时数据）：**
 
@@ -313,13 +311,40 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 - 已执行操作及效果
 - 下一步建议
 
+#### 工作负载问题诊断
+
+| 工具 | 功能 | 诊断范围 |
+|------|------|----------|
+| `huawei_workload_diagnose` | 工作负载异常综合诊断 | 指定工作负载或namespace下所有工作负载 |
+| `huawei_workload_diagnose_by_alarm` | 基于告警的工作负载诊断 | 触发告警的工作负载 |
+
+**诊断流程(近1小时数据)：**
+
+1. **收集工作负载信息** - 工作负载名称、namespace、副本数、Pod状态、异常比例
+2. **异常Pod诊断** - 挑选最多3个异常Pod进行诊断，参考CCE_Workload_Troubleshooting_Guide.md
+3. **节点诊断** - 调用节点诊断工具分析工作负载所在节点
+4. **网络链路诊断** - 调用网络诊断工具分析Service/Ingress/ELB/EIP链路
+5. **变更关联分析** - 分析scaled/created/updated/restarted等变更事件与故障的关联
+6. **AOM告警查询** - 获取工作负载相关的监控告警
+
+**输出报告包含：**
+- 工作负载基本信息（Deployment/StatefulSet、Pod、节点、Service、Ingress、ELB、NAT、EIP）
+- 异常Pod分析（状态、事件、日志）
+- 节点诊断结果汇总
+- 网络链路诊断结果汇总
+- 变更关联分析
+- Top3根因分析
+- 恢复建议，如用户同意可直接调用相关工具进行恢复
+
+**参考文档：**
+- [CCE工作负载异常排查指南](./references/CCE_Workload_Troubleshooting_Guide.md)
+
 #### 节点问题诊断
 
 | 工具 | 功能 | 诊断对象 |
 |------|------|----------|
 | `huawei_node_batch_diagnose` | 批量节点诊断 | 指定节点或异常节点 |
 | `huawei_node_diagnose` | 单个节点详细诊断 | 指定节点IP |
-| `huawei_list_abnormal_nodes` | 获取异常节点列表 | 集群内NotReady节点 |
 
 **诊断流程（近1小时数据）：**
 
@@ -347,18 +372,6 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 - 监控数据分析（CPU/内存/网络）
 - 高资源占用Pod列表
 - 下一步建议
-
-**8大检查项（可独立调用）：**
-| 工具 | 功能 |
-|------|------|
-| `huawei_pod_status_inspection` | Pod状态巡检（异常状态、容器重启次数） |
-| `huawei_addon_pod_monitoring_inspection` | 系统插件Pod监控（kube-system/monitoring） |
-| `huawei_biz_pod_monitoring_inspection` | 业务Pod监控 |
-| `huawei_node_status_inspection` | Node状态巡检（节点健康度） |
-| `huawei_node_resource_inspection` | 节点资源使用率巡检 |
-| `huawei_event_inspection` | 集群关键事件巡检 |
-| `huawei_aom_alarm_inspection` | AOM活跃告警巡检 |
-| `huawei_elb_monitoring_inspection` | ELB负载均衡监控巡检 |
 
 ---
 
@@ -487,6 +500,7 @@ python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 - Some metrics may not be available for all instance types
 - CCE cluster operations require appropriate Kubernetes RBAC permissions
 
+## References
 ## References
 - [CCE安全组配置说明](./references/CCE_Security_Group_Configuration.md)
 - [CCE节点故障检测策略配置指南](./references/CCE_Node_Fault_Detection_Configuration.md)

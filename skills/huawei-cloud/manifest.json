@@ -23,7 +23,7 @@
           },
           "ak": {
             "type": "string",
-            "description": "Access Key ID (optional if  env is set)"
+            "description": "Access Key ID (optional if HUAWEI_AK env is set)"
           },
           "sk": {
             "type": "string",
@@ -65,6 +65,82 @@
           "project_id": {
             "type": "string",
             "description": "Project ID (optional if HUAWEI_PROJECT_ID env is set)"
+          }
+        },
+        "required": [
+          "region",
+          "instance_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_stop_ecs_instance",
+      "description": "关闭（关机）指定的ECS实例。默认执行正常关机（SOFT），支持强制关机（HARD）。操作前需确认，危险操作必须携带 confirm=true。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域 (如 cn-north-4)"
+          },
+          "instance_id": {
+            "type": "string",
+            "description": "ECS实例ID"
+          },
+          "stop_type": {
+            "type": "string",
+            "description": "关机类型: SOFT(正常关机) 或 HARD(强制关机)，默认: SOFT"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          },
+          "confirm": {
+            "type": "string",
+            "description": "二次确认，必须设为 true 才执行关机操作"
+          }
+        },
+        "required": [
+          "region",
+          "instance_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_start_ecs_instance",
+      "description": "启动（开机）指定的ECS实例。用于将已关机的ECS实例重新开机。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域 (如 cn-north-4)"
+          },
+          "instance_id": {
+            "type": "string",
+            "description": "ECS实例ID"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
           }
         },
         "required": [
@@ -563,7 +639,7 @@
           },
           "instance_id": {
             "type": "string",
-            "description": "ECS instance ID (optional, used to construct disk_name)"
+            "description": "ECS instance ID which the volume is attached to (required, used to construct disk_name dimension"
           },
           "ak": {
             "type": "string",
@@ -580,7 +656,92 @@
         },
         "required": [
           "region",
-          "volume_id"
+          "volume_id",
+          "instance_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_get_nat_gateway_metrics",
+      "description": "获取NAT网关的监控指标（带宽、连接数、丢包率、新建连接速率等）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域（如cn-north-4）"
+          },
+          "nat_gateway_id": {
+            "type": "string",
+            "description": "NAT网关ID"
+          },
+          "hours": {
+            "type": "integer",
+            "description": "查询时间范围（小时），默认1小时"
+          },
+          "period": {
+            "type": "integer",
+            "description": "采样周期，单位秒，默认300（5分钟），可选值：300/1200/3600"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "nat_gateway_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_get_elb_metrics",
+      "description": "获取ELB弹性负载均衡的监控指标（带宽、连接数、QPS、状态码、响应时间等）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域（如cn-north-4）"
+          },
+          "elb_id": {
+            "type": "string",
+            "description": "ELB负载均衡器ID"
+          },
+          "hours": {
+            "type": "integer",
+            "description": "查询时间范围（小时），默认1小时"
+          },
+          "period": {
+            "type": "integer",
+            "description": "采样周期，单位秒，默认300（5分钟），可选值：300/1200/3600"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "elb_id"
         ]
       },
       "script": "scripts/huawei-cloud.py"
@@ -602,6 +763,10 @@
           "namespace": {
             "type": "string",
             "description": "Kubernetes namespace (optional, default: all namespaces)"
+          },
+          "labels": {
+            "type": "string",
+            "description": "Kubernetes label selector for filtering pods, e.g. 'app=nginx,version=v1' (optional)"
           },
           "ak": {
             "type": "string",
@@ -2291,7 +2456,7 @@
           "region"
         ]
       },
-      "script": "scripts/lts_tools.py"
+      "script": "scripts/huawei-cloud.py"
     },
     {
       "name": "huawei_list_log_streams",
@@ -2324,7 +2489,7 @@
           "region"
         ]
       },
-      "script": "scripts/lts_tools.py"
+      "script": "scripts/huawei-cloud.py"
     },
     {
       "name": "huawei_query_logs",
@@ -2379,49 +2544,6 @@
           "log_stream_id"
         ]
       },
-      "script": "scripts/lts_tools.py"
-    },
-    {
-      "name": "huawei_get_application_log_stream",
-      "description": "根据namespace和应用名获取对应的日志组和日志流，如果没有匹配到，就返回default-stdout。",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "region": {
-            "type": "string",
-            "description": "华为云区域"
-          },
-          "cluster_id": {
-            "type": "string",
-            "description": "CCE集群ID"
-          },
-          "namespace": {
-            "type": "string",
-            "description": "应用所在的命名空间"
-          },
-          "app_name": {
-            "type": "string",
-            "description": "应用名称"
-          },
-          "ak": {
-            "type": "string",
-            "description": "Access Key ID (可选，如已设置 HUAWEI_AK 环境变量)"
-          },
-          "sk": {
-            "type": "string",
-            "description": "Secret Access Key (可选，如已设置 HUAWEI_SK 环境变量)"
-          },
-          "project_id": {
-            "type": "string",
-            "description": "Project ID (可选，如已设置 HUAWEI_PROJECT_ID 环境变量)"
-          }
-        },
-        "required": [
-          "region",
-          "cluster_id",
-          "app_name"
-        ]
-      },
       "script": "scripts/huawei-cloud.py"
     },
     {
@@ -2460,7 +2582,7 @@
           "cluster_id"
         ]
       },
-      "script": "scripts/lts_tools.py"
+      "script": "scripts/huawei-cloud.py"
     },
     {
       "name": "huawei_query_aom_logs",
@@ -2521,7 +2643,7 @@
           "region"
         ]
       },
-      "script": "scripts/lts_tools.py"
+      "script": "scripts/huawei-cloud.py"
     },
     {
       "name": "huawei_get_recent_logs",
@@ -2572,7 +2694,62 @@
           "log_stream_id"
         ]
       },
-      "script": "scripts/lts_tools.py"
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_get_pod_logs",
+      "description": "获取 CCE 集群中指定 Pod 的容器日志（模拟 kubectl logs）",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域 (如 cn-north-4)"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE 集群 ID"
+          },
+          "pod_name": {
+            "type": "string",
+            "description": "Pod 名称"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "Kubernetes 命名空间 (默认: default)"
+          },
+          "container": {
+            "type": "string",
+            "description": "容器名称 (可选，不指定则返回第一个容器)"
+          },
+          "previous": {
+            "type": "boolean",
+            "description": "是否获取上一个已终止容器的日志 (默认: false)"
+          },
+          "tail_lines": {
+            "type": "integer",
+            "description": "返回最近 N 行日志 (默认: 100)"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "项目 ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id",
+          "pod_name"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
     },
     {
       "name": "huawei_query_application_logs",
@@ -2684,40 +2861,6 @@
           "region",
           "cluster_id",
           "app_name"
-        ]
-      },
-      "script": "scripts/huawei-cloud.py"
-    },
-    {
-      "name": "huawei_cce_cluster_inspection_subagent_legacy",
-      "description": "旧版Subagent分布式并行CCE集群巡检。",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "region": {
-            "type": "string",
-            "description": "华为云区域"
-          },
-          "cluster_id": {
-            "type": "string",
-            "description": "CCE集群ID"
-          },
-          "ak": {
-            "type": "string",
-            "description": "Access Key ID (可选)"
-          },
-          "sk": {
-            "type": "string",
-            "description": "Secret Access Key (可选)"
-          },
-          "project_id": {
-            "type": "string",
-            "description": "Project ID (可选)"
-          }
-        },
-        "required": [
-          "region",
-          "cluster_id"
         ]
       },
       "script": "scripts/huawei-cloud.py"
@@ -2901,6 +3044,10 @@
             "type": "integer",
             "description": "返回Top N Pod，默认10"
           },
+          "node_ip": {
+            "type": "string",
+            "description": "节点IP过滤（可选，只返回指定节点上的Pod）"
+          },
           "ak": {
             "type": "string",
             "description": "Access Key ID (可选)"
@@ -3045,6 +3192,416 @@
       "script": "scripts/huawei-cloud.py"
     },
     {
+      "name": "huawei_list_cce_statefulsets",
+      "description": "查询CCE集群内所有StatefulSet有状态服务信息（含副本数、状态、镜像、存储卷）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "命名空间（可选，默认查询所有）"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_list_cce_cronjobs",
+      "description": "查询CCE集群内所有CronJob定时任务信息（含调度计划、并发策略、暂停状态、最近执行时间等）。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "命名空间（可选，默认查询所有）"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_network_diagnose",
+      "description": "CCE工作负载网络问题诊断，自动梳理完整网络链路（Pod→Service→Ingress→ELB→NAT→EIP）并分析链路各组件状态、监控、告警，生成诊断报告。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域 (如 cn-north-4)"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "工作负载所在命名空间"
+          },
+          "workload_type": {
+            "type": "string",
+            "description": "工作负载类型：deployment/statefulset/daemonset"
+          },
+          "workload_name": {
+            "type": "string",
+            "description": "工作负载名称"
+          },
+          "hours": {
+            "type": "integer",
+            "description": "诊断时间范围（小时），默认1小时"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id",
+          "namespace",
+          "workload_type",
+          "workload_name"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_network_diagnose_by_alarm",
+      "description": "基于AOM告警触发的工作负载网络问题诊断，自动关联告警对应的工作负载并执行完整网络链路诊断。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域 (如 cn-north-4)"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "alarm_id": {
+            "type": "string",
+            "description": "AOM告警ID"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "告警关联的工作负载命名空间（可选，自动匹配时可不填）"
+          },
+          "workload_name": {
+            "type": "string",
+            "description": "告警关联的工作负载名称（可选，自动匹配时可不填）"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id",
+          "alarm_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_workload_diagnose",
+      "description": "CCE工作负载异常综合诊断。收集工作负载基础信息、诊断异常Pod（Pending/CrashLoopBackOff/ImagePullBackOff等）、联动节点诊断和网络链路诊断、进行变更关联分析、获取AOM告警，生成含Top3根因的综合诊断报告。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域 (如 cn-north-4)"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "workload_name": {
+            "type": "string",
+            "description": "工作负载名称（可选，不填则诊断namespace下所有工作负载）"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "命名空间 (默认: default)"
+          },
+          "fault_time": {
+            "type": "string",
+            "description": "故障时间点，格式: YYYY-MM-DD HH:MM:SS (可选)"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_workload_diagnose_by_alarm",
+      "description": "基于AOM告警触发CCE工作负载异常综合诊断。自动从告警信息中解析工作负载名称和命名空间，然后执行完整的工作负载诊断流程。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域 (如 cn-north-4)"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "alarm_info": {
+            "type": "string",
+            "description": "告警信息（JSON格式或告警名称），包含resource_id/namespace/name等字段"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id",
+          "alarm_info"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_hibernate_cce_cluster",
+      "description": "休眠CCE集群。将集群置于休眠状态，停止控制面计费和工作负载（但保留集群配置）。适用于临时不需要使用集群的场景，可节省成本。唤醒使用huawei_awake_cce_cluster。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域 (如 cn-north-4)"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_awake_cce_cluster",
+      "description": "唤醒休眠的CCE集群。恢复集群至正常运行状态，重新开始控制面计费，工作负载将自动恢复。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域 (如 cn-north-4)"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_node_diagnose",
+      "description": "CCE节点故障诊断，检查节点状态、资源使用率、系统组件（Kubelet/Containerd/CNI）、磁盘IO、网络连通性等，生成节点健康诊断报告。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域 (如 cn-north-4)"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "node_ip": {
+            "type": "string",
+            "description": "节点IP地址"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id",
+          "node_ip"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
+      "name": "huawei_node_batch_diagnose",
+      "description": "CCE节点批量故障诊断，同时诊断多个节点的健康状态，支持按节点标签过滤，输出批量诊断报告。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "region": {
+            "type": "string",
+            "description": "华为云区域 (如 cn-north-4)"
+          },
+          "cluster_id": {
+            "type": "string",
+            "description": "CCE集群ID"
+          },
+          "node_ips": {
+            "type": "array",
+            "description": "要诊断的节点IP列表（可选，不填则诊断集群所有节点）"
+          },
+          "label_selector": {
+            "type": "string",
+            "description": "节点标签选择器（可选，格式：key=value），按标签筛选要诊断的节点"
+          },
+          "ak": {
+            "type": "string",
+            "description": "Access Key ID (可选)"
+          },
+          "sk": {
+            "type": "string",
+            "description": "Secret Access Key (可选)"
+          },
+          "project_id": {
+            "type": "string",
+            "description": "Project ID (可选)"
+          }
+        },
+        "required": [
+          "region",
+          "cluster_id"
+        ]
+      },
+      "script": "scripts/huawei-cloud.py"
+    },
+    {
       "name": "huawei_get_application_log_stream",
       "description": "根据CCE集群ID、应用名、命名空间自动匹配对应的日志组和日志流ID，基于LogConfig规则匹配。",
       "parameters": {
@@ -3088,231 +3645,30 @@
       "script": "scripts/huawei-cloud.py"
     },
     {
-      "name": "huawei_workload_diagnose",
-      "description": "工作负载异常诊断 - 根据指定的工作负载名称和命名空间进行诊断",
+      "name": "huawei_test_all_tools",
+      "description": "测试huawei-cloud skill下的所有工具，自动获取测试资源，修改类操作仅预览",
       "parameters": {
         "type": "object",
         "properties": {
-          "region": {
-            "type": "string",
-            "description": "Huawei Cloud region (e.g., cn-north-4)"
-          },
-          "cluster_id": {
-            "type": "string",
-            "description": "CCE cluster ID"
-          },
-          "workload_name": {
-            "type": "string",
-            "description": "工作负载名称 (可选，不指定则诊断namespace下所有工作负载)"
-          },
-          "namespace": {
-            "type": "string",
-            "description": "命名空间 (default: default)"
-          },
-          "fault_time": {
-            "type": "string",
-            "description": "故障发生时间 (可选，格式: YYYY-MM-DD HH:MM:SS)"
-          },
           "ak": {
             "type": "string",
-            "description": "Access Key (optional if env is set)"
+            "description": "Access Key ID"
           },
           "sk": {
             "type": "string",
-            "description": "Secret Key (optional if HUAWEI_SK env is set)"
+            "description": "Secret Access Key"
           },
-          "project_id": {
-            "type": "string",
-            "description": "Project ID (optional)"
-          }
-        },
-        "required": [
-          "region",
-          "cluster_id"
-        ]
-      },
-      "script": "scripts/workload_diagnosis.py"
-    },
-    {
-      "name": "huawei_workload_diagnose_by_alarm",
-      "description": "工作负载异常诊断 - 基于告警信息触发诊断，自动解析告警中的工作负载信息",
-      "parameters": {
-        "type": "object",
-        "properties": {
           "region": {
             "type": "string",
-            "description": "Huawei Cloud region"
-          },
-          "cluster_id": {
-            "type": "string",
-            "description": "CCE cluster ID"
-          },
-          "alarm_info": {
-            "type": "string",
-            "description": "告警信息 (JSON格式或告警名称)"
-          },
-          "ak": {
-            "type": "string",
-            "description": "Access Key (optional)"
-          },
-          "sk": {
-            "type": "string",
-            "description": "Secret Key (optional)"
-          },
-          "project_id": {
-            "type": "string",
-            "description": "Project ID (optional)"
+            "description": "华为云区域 (默认: cn-north-4)"
           }
         },
         "required": [
-          "region",
-          "cluster_id"
+          "ak",
+          "sk"
         ]
       },
-      "script": "scripts/workload_diagnosis.py"
-    },
-    {
-      "name": "huawei_verify_workload",
-      "description": "恢复操作后验证工作负载状态 - 检查工作负载是否恢复正常",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "region": {
-            "type": "string",
-            "description": "Huawei Cloud region"
-          },
-          "cluster_id": {
-            "type": "string",
-            "description": "CCE cluster ID"
-          },
-          "workload_name": {
-            "type": "string",
-            "description": "工作负载名称"
-          },
-          "namespace": {
-            "type": "string",
-            "description": "命名空间 (default: default)"
-          },
-          "ak": {
-            "type": "string",
-            "description": "Access Key (optional)"
-          },
-          "sk": {
-            "type": "string",
-            "description": "Secret Key (optional)"
-          },
-          "project_id": {
-            "type": "string",
-            "description": "Project ID (optional)"
-          }
-        },
-        "required": [
-          "region",
-          "cluster_id",
-          "workload_name"
-        ]
-      },
-      "script": "scripts/workload_diagnosis.py"
-    },
-    {
-      "name": "huawei_scale_workload",
-      "description": "扩容/缩容工作负载实例 - 需要二次确认",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "region": {
-            "type": "string",
-            "description": "Huawei Cloud region"
-          },
-          "cluster_id": {
-            "type": "string",
-            "description": "CCE cluster ID"
-          },
-          "workload_name": {
-            "type": "string",
-            "description": "工作负载名称"
-          },
-          "namespace": {
-            "type": "string",
-            "description": "命名空间 (default: default)"
-          },
-          "replicas": {
-            "type": "integer",
-            "description": "目标副本数"
-          },
-          "confirm": {
-            "type": "boolean",
-            "description": "确认执行 (true/false)"
-          },
-          "ak": {
-            "type": "string",
-            "description": "Access Key (optional)"
-          },
-          "sk": {
-            "type": "string",
-            "description": "Secret Key (optional)"
-          },
-          "project_id": {
-            "type": "string",
-            "description": "Project ID (optional)"
-          }
-        },
-        "required": [
-          "region",
-          "cluster_id",
-          "workload_name",
-          "replicas"
-        ]
-      },
-      "script": "scripts/workload_diagnosis.py"
-    },
-    {
-      "name": "huawei_expand_nodepool",
-      "description": "扩容节点池节点 - 需要二次确认",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "region": {
-            "type": "string",
-            "description": "Huawei Cloud region"
-          },
-          "cluster_id": {
-            "type": "string",
-            "description": "CCE cluster ID"
-          },
-          "nodepool_id": {
-            "type": "string",
-            "description": "节点池ID"
-          },
-          "node_count": {
-            "type": "integer",
-            "description": "要增加的节点数量"
-          },
-          "confirm": {
-            "type": "boolean",
-            "description": "确认执行 (true/false)"
-          },
-          "ak": {
-            "type": "string",
-            "description": "Access Key (optional)"
-          },
-          "sk": {
-            "type": "string",
-            "description": "Secret Key (optional)"
-          },
-          "project_id": {
-            "type": "string",
-            "description": "Project ID (optional)"
-          }
-        },
-        "required": [
-          "region",
-          "cluster_id",
-          "nodepool_id",
-          "node_count"
-        ]
-      },
-      "script": "scripts/workload_diagnosis.py"
+      "script": "scripts/test_huawei_cloud_tools.py"
     }
   ]
 }
