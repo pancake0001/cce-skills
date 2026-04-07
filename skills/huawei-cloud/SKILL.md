@@ -33,7 +33,10 @@ AK/SK仅支持以下两种方式使用：
 | `huawei_scale_cce_workload` | 扩缩容 | 调整Deployment/StatefulSet副本数 |
 | `huawei_delete_cce_workload` | 删除 | 删除工作负载（Deployment/StatefulSet） |
 | `huawei_reboot_ecs` | 重启 | 重启ECS实例（强制重启风险更高） |
+| `huawei_cce_node_cordon` | 标记不可调度 | 节点标记为不可调度，新Pod不会分配 |
+| `huawei_cce_node_uncordon` | 恢复调度 | 节点恢复可调度，新Pod可能立即分配 |
 | `huawei_cce_node_drain` | 驱逐 | 驱逐节点所有Pod，影响业务 |
+| `huawei_hss_change_vul_status` | 漏洞状态修改 | 修复/忽略漏洞为高风险操作，无法回退 |
 
 ### 工作流程
 

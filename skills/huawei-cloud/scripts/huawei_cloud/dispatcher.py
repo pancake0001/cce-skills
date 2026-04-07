@@ -618,9 +618,27 @@ def _cce_node_operation(params: Dict[str, str], operation: str) -> Dict[str, Any
                     "schedulable": node.spec.unschedulable is None,
                     "ready": conditions.get("Ready") == "True", "conditions": conditions}
         elif operation == 'cordon':
+            if params.get('confirm', '').lower() != 'true':
+                return {
+                    "success": False,
+                    "requires_confirmation": True,
+                    "operation": "cordon",
+                    "node": node_name,
+                    "error": f"Cordon will mark node {node_name} as unschedulable. Existing Pods will not be evicted but no new pods will be assigned.",
+                    "hint": f"Add confirm=true to confirm. Example: huawei_cce_node_cordon region=cn-north-4 cluster_id=xxx node_name=192.168.x.x confirm=true"
+                }
             core_v1.patch_node(node_name, {'spec': {'unschedulable': True}})
             return {"success": True, "operation": "cordon", "node": node_name, "message": "Node marked as unschedulable"}
         elif operation == 'uncordon':
+            if params.get('confirm', '').lower() != 'true':
+                return {
+                    "success": False,
+                    "requires_confirmation": True,
+                    "operation": "uncordon",
+                    "node": node_name,
+                    "error": f"Uncordon will mark node {node_name} as schedulable. New pods may be immediately assigned to this node.",
+                    "hint": f"Add confirm=true to confirm. Example: huawei_cce_node_uncordon region=cn-north-4 cluster_id=xxx node_name=192.168.x.x confirm=true"
+                }
             core_v1.patch_node(node_name, {'spec': {'unschedulable': None}})
             return {"success": True, "operation": "uncordon", "node": node_name, "message": "Node marked as schedulable"}
         elif operation == 'drain':
