@@ -254,10 +254,30 @@ def list_vul_host_hosts(
         hosts = []
         for h in (response.data_list or []):
             host_id = h.host_id
-            # vul_status_unhandled counts (HSS can auto-handle these)
-            unhandled_total = getattr(h, "total_vul_num", 0)
-            # vul_status_unfix counts (require manual repair) - must query per-host
+
+            # Parse vul_num_with_repair_priority_list for vul_status_unhandled counts
+            # (HSS can auto-repair these; severity is "repair_priority" field)
+            unhandled_total = 0
+            unhandled_serious = 0
+            unhandled_high = 0
+            unhandled_medium = 0
+            unhandled_low = 0
+            for item in (h.vul_num_with_repair_priority_list or []):
+                p = getattr(item, 'repair_priority', '')
+                n = getattr(item, 'vul_num', 0) or 0
+                unhandled_total += n
+                if p == 'Critical':
+                    unhandled_serious = n
+                elif p == 'High':
+                    unhandled_high = n
+                elif p == 'Medium':
+                    unhandled_medium = n
+                elif p == 'Low':
+                    unhandled_low = n
+
+            # vul_status_unfix counts (require manual repair) - separate API call per host
             unfix = _get_host_unfix_counts(host_id, region, access_key, secret_key, enterprise_project_id)
+
             hosts.append({
                 "host_id": host_id,
                 "host_name": getattr(h, "host_name", ""),
@@ -265,13 +285,14 @@ def list_vul_host_hosts(
                 "os_type": getattr(h, "os_type", ""),
                 "agent_status": getattr(h, "agent_status", ""),
                 "protect_status": getattr(h, "protect_status", ""),
-                # vul_status_unhandled counts (HSS can auto-handle)
+                # vul_status_unhandled counts (HSS can auto-repair; from vul_num_with_repair_priority_list)
+                # These match the Huawei Console vulnerability display exactly
                 "total_vul_num": unhandled_total,
-                "serious_vul_num": getattr(h, "serious_vul_num", 0),
-                "high_vul_num": getattr(h, "high_vul_num", 0),
-                "medium_vul_num": getattr(h, "medium_vul_num", 0),
-                "low_vul_num": getattr(h, "low_vul_num", 0),
-                # vul_status_unfix counts (require manual repair)
+                "serious_vul_num": unhandled_serious,
+                "high_vul_num": unhandled_high,
+                "medium_vul_num": unhandled_medium,
+                "low_vul_num": unhandled_low,
+                # vul_status_unfix counts (require manual repair; from list_host_vuls status=unfix)
                 "unfix_total": unfix["unfix_total"],
                 "unfix_serious": unfix["unfix_serious"],
                 "unfix_high": unfix["unfix_high"],
