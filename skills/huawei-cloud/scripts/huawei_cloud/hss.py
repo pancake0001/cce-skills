@@ -173,6 +173,37 @@ def _create_hss_client(region: str, access_key: str, secret_key: str):
         .build()
 
 
+def _get_host_unfix_counts(host_id: str, region: str, access_key: str, secret_key: str,
+                            enterprise_project_id: str = "all_granted_eps") -> Dict[str, int]:
+    """获取主机的 vul_status_unfix 漏洞数量（按严重度统计）"""
+    try:
+        from huaweicloudsdkhss.v5 import ListHostVulsRequest
+        client = _create_hss_client(region, access_key, secret_key)
+        request = ListHostVulsRequest(
+            enterprise_project_id=enterprise_project_id,
+            host_id=host_id,
+            status="vul_status_unfix",
+            limit="200",
+            offset="0",
+        )
+        response = client.list_host_vuls(request)
+        counts = {"unfix_total": 0, "unfix_serious": 0, "unfix_high": 0, "unfix_medium": 0, "unfix_low": 0}
+        for v in (response.data_list or []):
+            sev = getattr(v, "severity_level", "")
+            counts["unfix_total"] += 1
+            if sev == "Critical":
+                counts["unfix_serious"] += 1
+            elif sev == "High":
+                counts["unfix_high"] += 1
+            elif sev == "Medium":
+                counts["unfix_medium"] += 1
+            elif sev == "Low":
+                counts["unfix_low"] += 1
+        return counts
+    except Exception:
+        return {"unfix_total": 0, "unfix_serious": 0, "unfix_high": 0, "unfix_medium": 0, "unfix_low": 0}
+
+
 # ──────────────────────────────────────────────────────────────
 # 漏洞查询
 # ──────────────────────────────────────────────────────────────
@@ -222,18 +253,30 @@ def list_vul_host_hosts(
 
         hosts = []
         for h in (response.data_list or []):
+            host_id = h.host_id
+            # vul_status_unhandled counts (HSS can auto-handle these)
+            unhandled_total = getattr(h, "total_vul_num", 0)
+            # vul_status_unfix counts (require manual repair) - must query per-host
+            unfix = _get_host_unfix_counts(host_id, region, access_key, secret_key, enterprise_project_id)
             hosts.append({
-                "host_id": h.host_id,
+                "host_id": host_id,
                 "host_name": getattr(h, "host_name", ""),
                 "private_ip": getattr(h, "private_ip", ""),
                 "os_type": getattr(h, "os_type", ""),
                 "agent_status": getattr(h, "agent_status", ""),
                 "protect_status": getattr(h, "protect_status", ""),
-                "total_vul_num": getattr(h, "total_vul_num", 0),
+                # vul_status_unhandled counts (HSS can auto-handle)
+                "total_vul_num": unhandled_total,
                 "serious_vul_num": getattr(h, "serious_vul_num", 0),
                 "high_vul_num": getattr(h, "high_vul_num", 0),
                 "medium_vul_num": getattr(h, "medium_vul_num", 0),
                 "low_vul_num": getattr(h, "low_vul_num", 0),
+                # vul_status_unfix counts (require manual repair)
+                "unfix_total": unfix["unfix_total"],
+                "unfix_serious": unfix["unfix_serious"],
+                "unfix_high": unfix["unfix_high"],
+                "unfix_medium": unfix["unfix_medium"],
+                "unfix_low": unfix["unfix_low"],
             })
 
         return {
@@ -280,8 +323,8 @@ def list_host_vuls(
         region: 区域ID
         host_id: 主机ID（与 host_name 二选一，host_id 优先）
         host_name: 主机名称
-        status: 漏洞状态（vul_status_unhandled / vul_status_fix /
-              vul_status_reboot / vul_status_ignored / vul_status_fixing）
+        status: 漏洞状态（vul_status_unhandled / vul_status_unfix /
+              vul_status_fix / vul_status_reboot / vul_status_ignored / vul_status_fixing）
         repair_priority: 修复优先级（Critical/High/Medium/Low）
         severity_level: 严重程度（Critical/High/Medium/Low）
         limit: 每页数量

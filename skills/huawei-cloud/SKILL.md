@@ -511,12 +511,44 @@ python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 
 ### HSS 漏洞状态说明
 
+#### ⚠️ `unhandled` vs `unfix` 的本质区别（极易混淆）
+
+| 字段 | `vul_status_unhandled` | `vul_status_unfix` |
+|------|------------------------|--------------------|
+| **含义** | HSS 可自动修复但尚未处理的漏洞 | 需要手动修复（非自动修复）的漏洞 |
+| **处理方式** | `immediate_repair` 自动修复 | 需人工介入（如内核升级、重启） |
+| **典型场景** | 普通软件包安全更新 | Linux 内核升级、需备份的系统更新 |
+| **`list_vul_host_hosts` 字段** | `total_vul_num` / `high_vul_num` 等 | **不包含在以上字段中** |
+| **查询方式** | `list_host_vuls` 不传 status | `list_host_vuls` 加 `status=vul_status_unfix` |
+
+**重要：`total_vul_num`（及其严重度字段）只统计 `unhandled`，不统计 `unfix`**
+
+> 实测：j6mjj 主机 `total_vul_num=0`，但 `list_host_vuls_all` 查出 **107 个 `unfix` 漏洞**（High:57/Critical:8/Medium:40/Low:3）。Console 显示 High:26/Medium:70/Low:11（严重度归类规则不同，但总数107完全吻合）。
+
+**巡检建议：**
+- 关注**整体安全**：`unhandled` + `unfix` 总数都要看
+- 关注**快速处置**：`unhandled` 可一键自动修复
+- 关注**完整修复计划**：`unfix` 需要制定人工修复方案
+
+#### 状态值完整列表
+
 | 状态 | 含义 | 处理方式 |
 |------|------|---------|
-| `vul_status_unhandled` | 未处理 | `immediate_repair` 修复 |
+| `vul_status_unhandled` | 未处理（HSS 可自动修复） | `immediate_repair` 修复 |
+| `vul_status_unfix` | 未修复（需手动修复） | 人工介入，制定修复计划 |
 | `vul_status_fix` | 已修复 | 无需操作 |
-| `vul_status_reboot` | 需重启 | 修复 + ECS重启 |
+| `vul_status_reboot` | 需重启（修复待重启生效） | 执行 ECS 重启 |
 | `vul_status_ignored` | 已忽略 | 无需操作 |
+| `vul_status_fixing` | 修复中 | 等待完成后确认 |
+
+#### `huawei_hss_list_vul_host_hosts` 字段说明
+
+| 字段 | 统计范围 |
+|------|---------|
+| `total_vul_num` / `serious_vul_num` / `high_vul_num` / `medium_vul_num` / `low_vul_num` | 仅 `vul_status_unhandled` |
+| `unfix_total` / `unfix_serious` / `unfix_high` / `unfix_medium` / `unfix_low` | 仅 `vul_status_unfix` |
+| `agent_status` | HSS Agent 在线状态 |
+| `protect_status` | 主机防护开启状态 |
 
 ### ⚠️ 关键约束：data_list 与 host_data_list 互斥
 
