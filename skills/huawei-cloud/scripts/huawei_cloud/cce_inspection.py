@@ -609,18 +609,26 @@ def node_vul_inspection(region: str, cluster_id: str, ak: str, sk: str, project_
             result["error"] = hss_result.get("error", "Failed to get HSS vulnerability data")
             return result, issues
         
-        hss_hosts = {h["host_id"]: h for h in hss_result.get("hosts", [])}
+        hss_hosts_by_id = {h["host_id"]: h for h in hss_result.get("hosts", [])}
+        hss_hosts_by_name = {h["host_name"]: h for h in hss_result.get("hosts", [])}
         result["checked"] = True
         
-        # 3. Match CCE nodes to HSS hosts by server_id (ECS instance ID)
+        # 3. Match CCE nodes to HSS hosts (by server_id first, then by node_name fallback)
         for node in nodes:
             server_id = node.get("server_id")  # ECS instance ID = HSS host_id
-            node_name = node.get("name", "unknown")
+            node_name = node.get("name", "unknown")  # CCE node name = HSS host_name
             labels = node.get("labels", {})
             
             # OS / Kernel 版本（K8s well-known node labels）
             os_version = labels.get("node.kubernetes.io/os_version", "")
             kernel_version = labels.get("node.kubernetes.io/kernel_version", "")
+            
+            # 优先用 server_id 匹配，fallback 到 node_name
+            hss_data = hss_hosts_by_id.get(server_id) if server_id else None
+            if hss_data is None:
+                hss_data = hss_hosts_by_name.get(node_name)
+            
+            in_hss = hss_data is not None
             
             vul_info = {
                 "node_name": node_name,
@@ -628,7 +636,7 @@ def node_vul_inspection(region: str, cluster_id: str, ak: str, sk: str, project_
                 "status": node.get("status"),
                 "os_version": os_version,
                 "kernel_version": kernel_version,
-                "in_hss": server_id in hss_hosts,
+                "in_hss": in_hss,
                 "total_vul_num": 0,
                 "unfix_total": 0,
                 "unfix_high": 0,
@@ -636,8 +644,7 @@ def node_vul_inspection(region: str, cluster_id: str, ak: str, sk: str, project_
                 "unfix_low": 0,
             }
             
-            if server_id and server_id in hss_hosts:
-                hss_data = hss_hosts[server_id]
+            if hss_data:
                 vul_info["total_vul_num"] = hss_data.get("total_vul_num", 0)
                 vul_info["unfix_total"] = hss_data.get("unfix_total", 0)
                 vul_info["unfix_high"] = hss_data.get("unfix_high", 0)
