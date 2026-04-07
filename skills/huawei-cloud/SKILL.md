@@ -510,7 +510,7 @@ python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 
 | 工具 | 功能 |
 |------|------|
-| `huawei_hss_list_vul_host_hosts` | 查询所有主机的漏洞概览 |
+| `huawei_hss_list_hosts` | 查询所有主机的漏洞概览 |
 | `huawei_hss_list_host_vuls_all` | 查询指定主机漏洞（全量自动翻页）|
 | `huawei_hss_change_vul_status` | 修改漏洞状态（忽略/修复/验证）|
 

@@ -23,7 +23,7 @@
 
 | 工具 | 功能 |
 |------|------|
-| `huawei_hss_list_vul_host_hosts` | 查询所有主机的漏洞概览 |
+| `huawei_hss_list_hosts` | 查询所有主机的漏洞概览 |
 | `huawei_hss_list_host_vuls_all` | 查询指定主机漏洞（全量自动翻页）|
 
 ### HSS 漏洞操作（均需 confirm）
@@ -52,7 +52,7 @@
 ```
 阶段一：信息收集
 ├── 集群节点列表 → list_cce_cluster_nodes（含 OS 版本、内核版本标签）
-├── 节点漏洞概览 → huawei_hss_list_vul_host_hosts（匹配 server_id）
+├── 节点漏洞概览 → huawei_hss_list_hosts（匹配 server_id）
 └── 单节点漏洞详情 → huawei_hss_list_host_vuls_all
 
 阶段二：制定修复计划 ← 【执行前必须输出完整计划】

@@ -676,7 +676,7 @@ ACTION_SPECS: Dict[str, tuple[tuple[str, ...], Handler]] = {
     "huawei_node_diagnose": (("region", "cluster_id"), _node_diagnose_action),
 
     # HSS vulnerability management
-    "huawei_hss_list_vul_host_hosts": (("region",), _hss_list_vul_host_hosts),
+    "huawei_hss_list_hosts": (("region",), _hss_list_vul_host_hosts),
     "huawei_hss_list_host_vuls_all": (("region", "host_id"), _hss_list_host_vuls_all),
     "huawei_hss_change_vul_status": (("region",), _hss_change_vul_status),
 
