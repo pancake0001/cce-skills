@@ -33,6 +33,8 @@ AK/SK仅支持以下两种方式使用：
 | `huawei_scale_cce_workload` | 扩缩容 | 调整Deployment/StatefulSet副本数 |
 | `huawei_delete_cce_workload` | 删除 | 删除工作负载（Deployment/StatefulSet） |
 | `huawei_reboot_ecs` | 重启 | 重启ECS实例（强制重启风险更高） |
+| `huawei_hibernate_cce_cluster` | 休眠 | 休眠集群并停止所有工作负载，暂停控制面计费 |
+| `huawei_awake_cce_cluster` | 唤醒 | 唤醒休眠集群，恢复工作负载和控制面计费 |
 | `huawei_cce_node_cordon` | 标记不可调度 | 节点标记为不可调度，新Pod不会分配 |
 | `huawei_cce_node_uncordon` | 恢复调度 | 节点恢复可调度，新Pod可能立即分配 |
 | `huawei_cce_node_drain` | 驱逐 | 驱逐节点所有Pod，影响业务 |
@@ -189,6 +191,7 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_list_cce_configmaps` | 查询集群内ConfigMap列表 |
 | `huawei_list_cce_secrets` | 查询集群内Secret列表 |
 | `huawei_get_cce_kubeconfig` | 获取集群kubeconfig配置 |
+| `huawei_get_cce_addon_detail` | 查询集群插件详情 |
 | `huawei_get_kubernetes_nodes` | 获取Kubernetes节点信息 |
 
 #### 节点管理
@@ -205,8 +208,8 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_cce_node_status` | 查询节点调度状态（含OS版本、内核版本） |
 | `huawei_delete_cce_node` | 从集群删除指定节点 |
 | `huawei_delete_cce_cluster` | 删除整个CCE集群 |
-| `huawei_hibernate_cce_cluster` | 休眠CCE集群（停止计费、保留配置） |
-| `huawei_awake_cce_cluster` | 唤醒休眠的CCE集群 |
+| `huawei_hibernate_cce_cluster` | 休眠CCE集群（需 confirm=true） |
+| `huawei_awake_cce_cluster` | 唤醒休眠的CCE集群（需 confirm=true） |
 
 #### 工作负载与资源
 
@@ -306,6 +309,7 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 |------|------|----------|
 | `huawei_network_diagnose` | 工作负载网络问题诊断 | 指定工作负载 |
 | `huawei_network_diagnose_by_alarm` | 基于告警的网络问题诊断 | 触发告警的工作负载 |
+| `huawei_network_verify_pod_scheduling` | 验证Pod调度可达性 | 验证指定工作负载Pod是否可正常调度 |
 
 **诊断流程（近1小时数据）：**
 

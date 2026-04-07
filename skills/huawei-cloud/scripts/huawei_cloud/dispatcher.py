@@ -478,15 +478,17 @@ def _workload_diagnose_by_alarm_action(params):
 
 def _hibernate_cce_cluster_action(params):
     return cce.hibernate_cce_cluster(
-        params["region"], params["cluster_id"],
-        params.get("ak"), params.get("sk"), params.get("project_id")
+        region=params["region"], cluster_id=params["cluster_id"],
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"),
+        confirm=params.get("confirm", "").lower() == "true"
     )
 
 
 def _awake_cce_cluster_action(params):
     return cce.awake_cce_cluster(
-        params["region"], params["cluster_id"],
-        params.get("ak"), params.get("sk"), params.get("project_id")
+        region=params["region"], cluster_id=params["cluster_id"],
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"),
+        confirm=params.get("confirm", "").lower() == "true"
     )
 
 

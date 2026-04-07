@@ -3352,11 +3352,12 @@ def hibernate_cce_cluster(
     ak: Optional[str] = None,
     sk: Optional[str] = None,
     project_id: Optional[str] = None,
+    confirm: bool = False,
 ) -> Dict[str, Any]:
     """Hibernate a CCE cluster (pause billing + workloads)
 
     Puts the cluster into hibernated state. Billing for control plane is paused.
-    workloads are stopped. Use awake_cce_cluster to resume.
+    Workloads are stopped. Use awake_cce_cluster to resume.
 
     Args:
         region: Huawei Cloud region (e.g., cn-north-4)
@@ -3364,6 +3365,7 @@ def hibernate_cce_cluster(
         ak: Access Key ID (optional)
         sk: Secret Access Key (optional)
         project_id: Project ID (optional)
+        confirm: Must be True to confirm the operation
 
     Returns:
         Dictionary with result
@@ -3381,6 +3383,16 @@ def hibernate_cce_cluster(
 
     if not SDK_AVAILABLE:
         return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+
+    if not confirm:
+        return {
+            "success": False,
+            "requires_confirmation": True,
+            "operation": "hibernate_cce_cluster",
+            "cluster_id": cluster_id,
+            "error": f"Hibernate will pause cluster {cluster_id} and stop all workloads. Billing for control plane is paused.",
+            "hint": f"Add confirm=true to confirm. Example: huawei_hibernate_cce_cluster region=cn-north-4 cluster_id=xxx confirm=true"
+        }
 
     try:
         from huaweicloudsdkcce.v3 import HibernateClusterRequest
@@ -3419,6 +3431,7 @@ def awake_cce_cluster(
     ak: Optional[str] = None,
     sk: Optional[str] = None,
     project_id: Optional[str] = None,
+    confirm: bool = False,
 ) -> Dict[str, Any]:
     """Awake a hibernated CCE cluster (resume billing + workloads)
 
@@ -3431,6 +3444,7 @@ def awake_cce_cluster(
         ak: Access Key ID (optional)
         sk: Secret Access Key (optional)
         project_id: Project ID (optional)
+        confirm: Must be True to confirm the operation
 
     Returns:
         Dictionary with result
@@ -3448,6 +3462,16 @@ def awake_cce_cluster(
 
     if not SDK_AVAILABLE:
         return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+
+    if not confirm:
+        return {
+            "success": False,
+            "requires_confirmation": True,
+            "operation": "awake_cce_cluster",
+            "cluster_id": cluster_id,
+            "error": f"Awake will resume cluster {cluster_id}. Control plane billing resumes and workloads restart.",
+            "hint": f"Add confirm=true to confirm. Example: huawei_awake_cce_cluster region=cn-north-4 cluster_id=xxx confirm=true"
+        }
 
     try:
         from huaweicloudsdkcce.v3 import AwakeClusterRequest
