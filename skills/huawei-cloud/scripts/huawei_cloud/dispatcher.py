@@ -6,13 +6,12 @@ from typing import Any, Callable, Dict
 
 import json
 
-from . import aom, cce, cce_metrics, ecs, elb, identity, network, storage
+from . import aom, cce, cce_metrics, ecs, elb, hss, identity, network, storage
 from . import cce_inspection
 from . import cce_diagnosis
 from . import common
 
 # cce_app_logs and lts require huaweicloudsdklts which may not be installed
-# Lazy import to avoid breaking the dispatcher
 try:
     from . import cce_app_logs as _cce_app_logs_mod
     from . import lts as _lts_mod
@@ -21,21 +20,6 @@ except ImportError:
     _lts_available = False
     _cce_app_logs_mod = None
     _lts_mod = None
-
-import os
-import sys
-
-# Add parent dir for hss_tools import
-_scripts = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _scripts not in sys.path:
-    sys.path.insert(0, _scripts)
-
-from hss_tools import (
-    huawei_hss_list_vul_host_hosts,
-    huawei_hss_list_host_vuls,
-    huawei_hss_list_host_vuls_all,
-    huawei_hss_change_vul_status,
-)
 
 
 Handler = Callable[[Dict[str, str]], Dict[str, Any]]
@@ -532,21 +516,51 @@ def _list_cce_cronjobs(params: Dict[str, str]) -> Dict[str, Any]:
 
 # ---- HSS handlers ----
 def _hss_list_vul_host_hosts(params: Dict[str, str]) -> Dict[str, Any]:
-    rest = {k: v for k, v in params.items() if k not in ('region', 'ak', 'sk')}
-    return huawei_hss_list_vul_host_hosts(region=params["region"], ak=params.get("ak"), sk=params.get("sk"), **rest)
+    return hss.list_vul_host_hosts(region=params["region"], ak=params.get("ak"), sk=params.get("sk"))
 
 def _hss_list_host_vuls(params: Dict[str, str]) -> Dict[str, Any]:
-    rest = {k: v for k, v in params.items() if k not in ('region', 'ak', 'sk')}
-    return huawei_hss_list_host_vuls(region=params["region"], ak=params.get("ak"), sk=params.get("sk"), **rest)
+    return hss.list_host_vuls(
+        region=params["region"],
+        ak=params.get("ak"),
+        sk=params.get("sk"),
+        host_id=params.get("host_id"),
+        host_name=params.get("host_name"),
+        status=params.get("status"),
+        repair_priority=params.get("repair_priority"),
+        severity_level=params.get("severity_level"),
+        limit=int(params.get("limit", 100)),
+        offset=int(params.get("offset", 0)),
+        enterprise_project_id=params.get("enterprise_project_id", "all_granted_eps"),
+    )
 
 def _hss_list_host_vuls_all(params: Dict[str, str]) -> Dict[str, Any]:
-    rest = {k: v for k, v in params.items() if k not in ('region', 'ak', 'sk')}
-    return huawei_hss_list_host_vuls_all(region=params["region"], ak=params.get("ak"), sk=params.get("sk"), **rest)
+    return hss.list_host_vuls_all(
+        region=params["region"],
+        ak=params.get("ak"),
+        sk=params.get("sk"),
+        host_id=params.get("host_id"),
+        host_name=params.get("host_name"),
+        status=params.get("status"),
+        repair_priority=params.get("repair_priority"),
+        severity_level=params.get("severity_level"),
+        limit=int(params.get("limit", 100)),
+        enterprise_project_id=params.get("enterprise_project_id", "all_granted_eps"),
+    )
 
 def _hss_change_vul_status(params: Dict[str, str]) -> Dict[str, Any]:
-    confirm = params.get("confirm", "").lower() == "true"
-    rest = {k: v for k, v in params.items() if k not in ('region', 'ak', 'sk', 'confirm')}
-    return huawei_hss_change_vul_status(region=params["region"], ak=params.get("ak"), sk=params.get("sk"), confirm=confirm, **rest)
+    return hss.change_vul_status(
+        region=params["region"],
+        ak=params.get("ak"),
+        sk=params.get("sk"),
+        operate_type=params["operate_type"],
+        vul_ids=params.get("vul_ids"),
+        host_ids=params.get("host_ids"),
+        vul_type=params.get("vul_type", "linux_vul"),
+        remark=params.get("remark"),
+        select_type=params.get("select_type"),
+        confirm=params.get("confirm", "").lower() == "true",
+        enterprise_project_id=params.get("enterprise_project_id", "all_granted_eps"),
+    )
 
 
 # ---- CCE node operation helpers ----
