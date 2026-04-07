@@ -1730,7 +1730,7 @@ def cce_cluster_inspection(region: str, cluster_id: str, ak: str = None, sk: str
             if ns and ns not in ["kube-system", "monitoring"]:
                 all_namespaces.add(ns)
 
-    # 8 大巡检项
+    # 9 大巡检项
     checks = [
         ("pods", pod_status_inspection(region, cluster_id, access_key, secret_key, proj_id)),
         ("nodes", node_status_inspection(region, cluster_id, access_key, secret_key, proj_id)),
@@ -1744,6 +1744,7 @@ def cce_cluster_inspection(region: str, cluster_id: str, ak: str = None, sk: str
         ("alarms", aom_alarm_inspection(region, cluster_id, cluster_name, access_key, secret_key, proj_id)),
         ("elb_monitoring", elb_monitoring_inspection(
             region, cluster_id, aom_instance_id, cluster_name, access_key, secret_key, proj_id)),
+        ("node_vul", node_vul_inspection(region, cluster_id, access_key, secret_key, proj_id)),
     ]
 
     for task_id, (check_result, issues) in checks:
