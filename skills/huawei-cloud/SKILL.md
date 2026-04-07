@@ -511,44 +511,48 @@ python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 
 ### HSS 漏洞状态说明
 
-#### ⚠️ `unhandled` vs `unfix` 的本质区别（极易混淆）
+#### ⚠️ `vul_status_unhandled` vs `vul_status_unfix` 的真实行为（API实测）
 
-| 字段 | `vul_status_unhandled` | `vul_status_unfix` |
+| 行为 | `vul_status_unhandled` | `vul_status_unfix` |
 |------|------------------------|--------------------|
-| **含义** | HSS 可自动修复但尚未处理的漏洞 | 需要手动修复（非自动修复）的漏洞 |
-| **处理方式** | `immediate_repair` 自动修复 | 需人工介入（如内核升级、重启） |
-| **典型场景** | 普通软件包安全更新 | Linux 内核升级、需备份的系统更新 |
-| **`list_vul_host_hosts` 字段** | `total_vul_num` / `high_vul_num` 等 | **不包含在以上字段中** |
-| **查询方式** | `list_host_vuls` 不传 status | `list_host_vuls` 加 `status=vul_status_unfix` |
+| **status 过滤行为** | 返回**所有漏洞**（= 无过滤，等同于不传 status） | 仅返回 `vul_status_unfix` 状态的漏洞 |
+| **包含 fixed?** | 是（包含所有状态） | 否 |
+| **j6mjj 实测** | 108个（= 无过滤） | 107个 |
 
-**重要：`total_vul_num`（及其严重度字段）只统计 `unhandled`，不统计 `unfix`**
+**结论：`vul_status_unhandled` 是查询所有漏洞的别名，不是过滤条件。真正的状态过滤只有 `vul_status_unfix` 是有效的。**
 
-> 实测：j6mjj 主机 `total_vul_num=0`，但 `list_host_vuls_all` 查出 **107 个 `unfix` 漏洞**（High:57/Critical:8/Medium:40/Low:3）。Console 显示 High:26/Medium:70/Low:11（严重度归类规则不同，但总数107完全吻合）。
+> 你的猜测方向正确：`vul_status_unhandled` 是对所有状态的一个兜底封装，但实际行为是返回全部漏洞。
 
-**巡检建议：**
-- 关注**整体安全**：`unhandled` + `unfix` 总数都要看
-- 关注**快速处置**：`unhandled` 可一键自动修复
-- 关注**完整修复计划**：`unfix` 需要制定人工修复方案
+#### `vul_num_with_repair_priority_list` vs `severity_level`（两套严重度体系）
 
-#### 状态值完整列表
+`list_vul_host_hosts` 的 `vul_num_with_repair_priority_list` 和 `list_host_vuls` 的 `severity_level` 是**两套独立的严重度分类**，不要混淆：
 
-| 状态 | 含义 | 处理方式 |
-|------|------|---------|
-| `vul_status_unhandled` | 未处理（HSS 可自动修复） | `immediate_repair` 修复 |
-| `vul_status_unfix` | 未修复（需手动修复） | 人工介入，制定修复计划 |
-| `vul_status_fix` | 已修复 | 无需操作 |
-| `vul_status_reboot` | 需重启（修复待重启生效） | 执行 ECS 重启 |
-| `vul_status_ignored` | 已忽略 | 无需操作 |
-| `vul_status_fixing` | 修复中 | 等待完成后确认 |
+| 来源 | 字段 | 分类体系 | j6mjj 统计 |
+|------|------|---------|-----------|
+| **Console 显示** | `repair_priority` | 修复优先级 | High:26 / Medium:70 / Low:11 = **107** |
+| `list_host_vuls` | `severity_level` | CVE NVD 官方严重度 | Critical:8 / High:57 / Medium:40 / Low:3 = **108** |
 
 #### `huawei_hss_list_vul_host_hosts` 字段说明
 
-| 字段 | 统计范围 |
-|------|---------|
-| `total_vul_num` / `serious_vul_num` / `high_vul_num` / `medium_vul_num` / `low_vul_num` | 仅 `vul_status_unhandled` |
-| `unfix_total` / `unfix_serious` / `unfix_high` / `unfix_medium` / `unfix_low` | 仅 `vul_status_unfix` |
-| `agent_status` | HSS Agent 在线状态 |
-| `protect_status` | 主机防护开启状态 |
+| 字段 | 数据来源 | 说明 |
+|------|---------|------|
+| `total_vul_num` / `high_vul_num` / `medium_vul_num` / `low_vul_num` | `vul_num_with_repair_priority_list`（repair_priority） | **匹配 Console 显示**，修复优先级分类 |
+| `unfix_total` / `unfix_high` 等 | `list_host_vuls` status=`vul_status_unfix` | 仅 `vul_status_unfix` 漏洞数，CVE 严重度分类 |
+| `agent_status` | 直接字段 | HSS Agent 在线状态 |
+| `protect_status` | 直接字段 | 主机防护开启状态 |
+
+**注意：SDK 类中不存在 `total_vul_num`/`high_vul_num` 等直接字段，必须从 `vul_num_with_repair_priority_list` 解析。**
+
+#### 状态值完整列表
+
+| 状态 | 含义 | `list_host_vuls` 过滤有效？ |
+|------|------|---------------------------|
+| `vul_status_unhandled` | 所有漏洞（= 无过滤） | ❌ 返回全部（含 fixed/unfix） |
+| `vul_status_unfix` | 需要手动修复 | ✅ 正确过滤 |
+| `vul_status_fix` | 已修复 | ⚠️ 待验证 |
+| `vul_status_reboot` | 需重启 | ⚠️ 待验证 |
+| `vul_status_ignored` | 已忽略 | ⚠️ 待验证 |
+| `vul_status_fixing` | 修复中 | ⚠️ 待验证 |
 
 ### ⚠️ 关键约束：data_list 与 host_data_list 互斥
 
