@@ -618,14 +618,9 @@ def node_vul_inspection(region: str, cluster_id: str, ak: str, sk: str, project_
             node_name = node.get("name", "unknown")
             labels = node.get("labels", {})
             
-            # OS / Kernel 版本（来自 K8s node labels）
+            # OS / Kernel 版本（K8s well-known node labels）
             os_version = labels.get("node.kubernetes.io/os_version", "")
             kernel_version = labels.get("node.kubernetes.io/kernel_version", "")
-            # 兼容 CCE 特有标签
-            if not os_version:
-                os_version = labels.get("CCE.DECK/OS_VERSION", "")
-            if not kernel_version:
-                kernel_version = labels.get("CCE.DECK/KERNEL_VERSION", "")
             
             vul_info = {
                 "node_name": node_name,

@@ -202,7 +202,7 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_cce_node_cordon` | 标记节点不可调度（cordon） |
 | `huawei_cce_node_uncordon` | 恢复节点可调度（uncordon） |
 | `huawei_cce_node_drain` | 驱逐节点 Pod（需 confirm=true） |
-| `huawei_cce_node_status` | 查询节点调度状态 |
+| `huawei_cce_node_status` | 查询节点调度状态（含OS版本、内核版本） |
 | `huawei_delete_cce_node` | 从集群删除指定节点 |
 | `huawei_delete_cce_cluster` | 删除整个CCE集群 |
 | `huawei_hibernate_cce_cluster` | 休眠CCE集群（停止计费、保留配置） |

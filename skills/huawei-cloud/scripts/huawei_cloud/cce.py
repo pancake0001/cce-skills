@@ -3864,10 +3864,13 @@ def _node_operation(region: str, cluster_id: str, node_name: str, operation: str
             if operation == 'status':
                 node = core_v1.read_node(node_name)
                 conditions = {c.type: c.status for c in node.status.conditions}
+                node_labels = dict(node.metadata.labels) if node.metadata.labels else {}
                 return {
                     "success": True, "operation": "status", "node": node_name,
                     "schedulable": node.spec.unschedulable is None,
-                    "ready": conditions.get("Ready") == "True", "conditions": conditions
+                    "ready": conditions.get("Ready") == "True", "conditions": conditions,
+                    "os_version": node_labels.get("node.kubernetes.io/os_version", ""),
+                    "kernel_version": node_labels.get("node.kubernetes.io/kernel_version", ""),
                 }
             elif operation == 'cordon':
                 if not confirm:
