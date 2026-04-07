@@ -6,9 +6,36 @@ from typing import Any, Callable, Dict
 
 import json
 
-from . import aom, cce_app_logs, cce, cce_metrics, ecs, elb, identity, lts, network, storage
+from . import aom, cce, cce_metrics, ecs, elb, identity, network, storage
 from . import cce_inspection
 from . import cce_diagnosis
+from . import common
+
+# cce_app_logs and lts require huaweicloudsdklts which may not be installed
+# Lazy import to avoid breaking the dispatcher
+try:
+    from . import cce_app_logs as _cce_app_logs_mod
+    from . import lts as _lts_mod
+    _lts_available = True
+except ImportError:
+    _lts_available = False
+    _cce_app_logs_mod = None
+    _lts_mod = None
+
+import os
+import sys
+
+# Add parent dir for hss_tools import
+_scripts = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _scripts not in sys.path:
+    sys.path.insert(0, _scripts)
+
+from hss_tools import (
+    huawei_hss_list_vul_host_hosts,
+    huawei_hss_list_host_vuls,
+    huawei_hss_list_host_vuls_all,
+    huawei_hss_change_vul_status,
+)
 
 
 Handler = Callable[[Dict[str, str]], Dict[str, Any]]
@@ -261,25 +288,25 @@ def _list_aom_current_alarms(params: Dict[str, str]) -> Dict[str, Any]:
 
 
 def _list_log_groups(params: Dict[str, str]) -> Dict[str, Any]:
-    return lts.list_log_groups(params["region"], params.get("ak"), params.get("sk"), params.get("project_id"))
+    return _lts_mod.list_log_groups(params["region"], params.get("ak"), params.get("sk"), params.get("project_id"))
 
 
 def _list_log_streams(params: Dict[str, str]) -> Dict[str, Any]:
-    return lts.list_log_streams(params["region"], params.get("log_group_id"), params.get("ak"), params.get("sk"), params.get("project_id"))
+    return _lts_mod.list_log_streams(params["region"], params.get("log_group_id"), params.get("ak"), params.get("sk"), params.get("project_id"))
 
 
 def _query_logs(params: Dict[str, str]) -> Dict[str, Any]:
     labels = _parse_json_param(params.get("labels"))
-    return lts.query_logs(params["region"], params["log_group_id"], params["log_stream_id"], params.get("start_time"), params.get("end_time"), params.get("keywords"), _to_int(params.get("limit"), 1000), params.get("scroll_id"), params.get("is_desc", "true").lower() == "true", params.get("is_iterative", "false").lower() == "true", labels, params.get("ak"), params.get("sk"), params.get("project_id"))
+    return _lts_mod.query_logs(params["region"], params["log_group_id"], params["log_stream_id"], params.get("start_time"), params.get("end_time"), params.get("keywords"), _to_int(params.get("limit"), 1000), params.get("scroll_id"), params.get("is_desc", "true").lower() == "true", params.get("is_iterative", "false").lower() == "true", labels, params.get("ak"), params.get("sk"), params.get("project_id"))
 
 
 def _get_recent_logs(params: Dict[str, str]) -> Dict[str, Any]:
     labels = _parse_json_param(params.get("labels"))
-    return lts.get_recent_logs(params["region"], params["log_group_id"], params["log_stream_id"], _to_int(params.get("hours"), 1), _to_int(params.get("limit"), 1000), params.get("keywords"), labels, params.get("ak"), params.get("sk"), params.get("project_id"))
+    return _lts_mod.get_recent_logs(params["region"], params["log_group_id"], params["log_stream_id"], _to_int(params.get("hours"), 1), _to_int(params.get("limit"), 1000), params.get("keywords"), labels, params.get("ak"), params.get("sk"), params.get("project_id"))
 
 
 def _query_aom_logs(params: Dict[str, str]) -> Dict[str, Any]:
-    return lts.query_aom_logs(params["region"], params["cluster_id"], params.get("namespace"), params.get("pod_name"), params.get("container_name"), params.get("start_time"), params.get("end_time"), params.get("keywords"), _to_int(params.get("limit"), 100), params.get("ak"), params.get("sk"), params.get("project_id"))
+    return _lts_mod.query_aom_logs(params["region"], params["cluster_id"], params.get("namespace"), params.get("pod_name"), params.get("container_name"), params.get("start_time"), params.get("end_time"), params.get("keywords"), _to_int(params.get("limit"), 100), params.get("ak"), params.get("sk"), params.get("project_id"))
 
 
 def _inspection_action(handler: Callable[[Dict[str, str]], Dict[str, Any]], params: Dict[str, str]) -> Dict[str, Any]:
@@ -503,6 +530,139 @@ def _list_cce_cronjobs(params: Dict[str, str]) -> Dict[str, Any]:
     )
 
 
+# ---- HSS handlers ----
+def _hss_list_vul_host_hosts(params: Dict[str, str]) -> Dict[str, Any]:
+    rest = {k: v for k, v in params.items() if k not in ('region', 'ak', 'sk')}
+    return huawei_hss_list_vul_host_hosts(region=params["region"], ak=params.get("ak"), sk=params.get("sk"), **rest)
+
+def _hss_list_host_vuls(params: Dict[str, str]) -> Dict[str, Any]:
+    rest = {k: v for k, v in params.items() if k not in ('region', 'ak', 'sk')}
+    return huawei_hss_list_host_vuls(region=params["region"], ak=params.get("ak"), sk=params.get("sk"), **rest)
+
+def _hss_list_host_vuls_all(params: Dict[str, str]) -> Dict[str, Any]:
+    rest = {k: v for k, v in params.items() if k not in ('region', 'ak', 'sk')}
+    return huawei_hss_list_host_vuls_all(region=params["region"], ak=params.get("ak"), sk=params.get("sk"), **rest)
+
+def _hss_change_vul_status(params: Dict[str, str]) -> Dict[str, Any]:
+    confirm = params.get("confirm", "").lower() == "true"
+    rest = {k: v for k, v in params.items() if k not in ('region', 'ak', 'sk', 'confirm')}
+    return huawei_hss_change_vul_status(region=params["region"], ak=params.get("ak"), sk=params.get("sk"), confirm=confirm, **rest)
+
+
+# ---- CCE node operation helpers ----
+def _create_k8s_client_from_kubeconfig(kubeconfig_data: dict):
+    import tempfile, os
+    kubeconfig_str = kubeconfig_data.get("kubeconfig") or kubeconfig_data.get("content", "")
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.kubeconfig', delete=False) as f:
+        f.write(kubeconfig_str)
+        kubeconfig_path = f.name
+    try:
+        import kubernetes
+        from kubernetes.client import Configuration
+        from kubernetes.config import load_kube_config
+        load_kube_config(config_file=kubeconfig_path)
+        configuration = Configuration.get_default_copy()
+        configuration.verify_ssl = False
+        Configuration.set_default(configuration)
+        return kubernetes.client, configuration, kubeconfig_path
+    except Exception:
+        from kubernetes import client
+        try:
+            configuration = type('Cfg', (), {
+                'host': kubeconfig_data.get('api_server'),
+                'verify_ssl': False,
+                'api_key': {'authorization': 'Bearer ' + kubeconfig_data.get('token', '')}
+            })()
+            client.Configuration.set_default(configuration)
+            return client, configuration, kubeconfig_path
+        except Exception:
+            return None, None, kubeconfig_path
+
+
+def _cce_node_operation(params: Dict[str, str], operation: str) -> Dict[str, Any]:
+    import kubernetes as k8s, kubernetes.client, os
+    region = params["region"]
+    cluster_id = params["cluster_id"]
+    node_name = params["node_name"]
+    creds = common.get_credentials(params.get("ak"), params.get("sk"))
+    access_key, secret_key, project_id = creds[0], creds[1], creds[2] if len(creds) > 2 else None
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Missing credentials"}
+    try:
+        cce_client = common.create_cce_client(region, access_key, secret_key, project_id)
+        from huaweicloudsdkcce.v3 import CreateKubernetesClusterCertRequest, ClusterCertDuration
+        cert_req = CreateKubernetesClusterCertRequest(cluster_id=cluster_id)
+        cert_req.body = ClusterCertDuration(duration=1)
+        kubeconfig_data = cce_client.create_kubernetes_cluster_cert(cert_req).to_dict()
+        _, _, cert_file = _create_k8s_client_from_kubeconfig(kubeconfig_data)
+        k8s.client.Configuration.set_default(k8s.client.Configuration())
+        core_v1 = k8s.client.CoreV1Api()
+        if operation == 'status':
+            node = core_v1.read_node(node_name)
+            conditions = {c.type: c.status for c in node.status.conditions}
+            return {"success": True, "operation": "status", "node": node_name,
+                    "schedulable": node.spec.unschedulable is None,
+                    "ready": conditions.get("Ready") == "True", "conditions": conditions}
+        elif operation == 'cordon':
+            core_v1.patch_node(node_name, {'spec': {'unschedulable': True}})
+            return {"success": True, "operation": "cordon", "node": node_name, "message": "Node marked as unschedulable"}
+        elif operation == 'uncordon':
+            core_v1.patch_node(node_name, {'spec': {'unschedulable': None}})
+            return {"success": True, "operation": "uncordon", "node": node_name, "message": "Node marked as schedulable"}
+        elif operation == 'drain':
+            skip_ns = set(['kube-system', 'hss', 'monitoring'])
+            grace = 30
+            pods = core_v1.list_pod_for_all_namespaces(field_selector=f'spec.nodeName={node_name}').items
+            deleted, skipped = [], []
+            for p in pods:
+                ns, pname = p.metadata.namespace, p.metadata.name
+                if ns in skip_ns:
+                    skipped.append(f"{ns}/{pname}"); continue
+                try:
+                    body = k8s.client.V1DeleteOptions(grace_period_seconds=grace)
+                    core_v1.delete_namespaced_pod(pname, ns, body=body)
+                    deleted.append(f"{ns}/{pname}")
+                except Exception as e:
+                    skipped.append(f"{ns}/{pname} ({e})"[:100])
+            return {"success": True, "operation": "drain", "node": node_name, "deleted": deleted, "skipped": skipped}
+    finally:
+        if cert_file and os.path.exists(cert_file):
+            os.unlink(cert_file)
+
+def _cce_node_cordon(params: Dict[str, str]) -> Dict[str, Any]:
+    return _cce_node_operation(params, "cordon")
+
+def _cce_node_uncordon(params: Dict[str, str]) -> Dict[str, Any]:
+    return _cce_node_operation(params, "uncordon")
+
+def _cce_node_drain(params: Dict[str, str]) -> Dict[str, Any]:
+    return _cce_node_operation(params, "drain")
+
+def _cce_node_status(params: Dict[str, str]) -> Dict[str, Any]:
+    return _cce_node_operation(params, "status")
+
+
+# ---- ECS reboot ----
+def _reboot_ecs(params: Dict[str, str]) -> Dict[str, Any]:
+    instance_id = params.get("instance_id")
+    if not instance_id:
+        return {"success": False, "error": "instance_id is required"}
+    reboot_type = params.get("reboot_type", "SOFT").upper()
+    creds = common.get_credentials(params.get("ak"), params.get("sk"))
+    access_key, secret_key, project_id = creds[0], creds[1], creds[2] if len(creds) > 2 else None
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Missing credentials"}
+    from huaweicloudsdkecs.v2 import BatchRebootServersRequest
+    req = BatchRebootServersRequest()
+    req.body = {"servers": [{"id": instance_id}], "type": reboot_type}
+    try:
+        cce_cli = common.create_cce_client(params["region"], access_key, secret_key, project_id)
+        result = cce_cli.batch_reboot_servers(req)
+        return {"success": True, "instance_id": instance_id, "reboot_type": reboot_type, "result": str(result)}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 ACTION_SPECS: Dict[str, tuple[tuple[str, ...], Handler]] = {
     "huawei_list_ecs": (("region",), _list_ecs),
     "huawei_get_ecs_metrics": (("region", "instance_id"), _get_ecs_metrics),
@@ -579,10 +739,10 @@ ACTION_SPECS: Dict[str, tuple[tuple[str, ...], Handler]] = {
     "huawei_event_inspection": (("region", "cluster_id"), lambda params: _inspection_check_action(cce_inspection.event_inspection, params)),
     "huawei_aom_alarm_inspection": (("region", "cluster_id"), _aom_alarm_inspection_action),
     "huawei_elb_monitoring_inspection": (("region", "cluster_id"), _elb_monitoring_inspection_action),
-    "huawei_get_cce_logconfigs": (("region", "cluster_id"), lambda params: cce_app_logs.get_cce_logconfigs_action(params)),
-    "huawei_get_application_log_stream": (("region", "cluster_id", "app_name"), lambda params: cce_app_logs.get_application_log_stream_action(params)),
-    "huawei_query_application_logs": (("region", "cluster_id", "app_name"), lambda params: cce_app_logs.query_application_logs_action(params)),
-    "huawei_query_application_recent_logs": (("region", "cluster_id", "app_name"), lambda params: cce_app_logs.query_application_recent_logs_action(params)),
+    "huawei_get_cce_logconfigs": (("region", "cluster_id"), lambda params: _cce_app_logs_mod.get_cce_logconfigs_action(params)),
+    "huawei_get_application_log_stream": (("region", "cluster_id", "app_name"), lambda params: _cce_app_logs_mod.get_application_log_stream_action(params)),
+    "huawei_query_application_logs": (("region", "cluster_id", "app_name"), lambda params: _cce_app_logs_mod.query_application_logs_action(params)),
+    "huawei_query_application_recent_logs": (("region", "cluster_id", "app_name"), lambda params: _cce_app_logs_mod.query_application_recent_logs_action(params)),
     "huawei_get_cce_pod_metrics_topN": (("region", "cluster_id"), lambda params: _metric_action(cce_metrics.get_cce_pod_metrics_topN, params["region"], params["cluster_id"], params.get("ak"), params.get("sk"), params.get("project_id"), params.get("namespace"), params.get("label_selector"), _to_int(params.get("top_n"), 10), _to_int(params.get("hours"), 1), params.get("cpu_query"), params.get("memory_query"), params.get("node_ip"))),
     "huawei_get_cce_pod_metrics": (("region", "cluster_id", "pod_name"), lambda params: _metric_action(cce_metrics.get_cce_pod_metrics, params["region"], params["cluster_id"], params["pod_name"], params.get("ak"), params.get("sk"), params.get("project_id"), params.get("namespace"), _to_int(params.get("hours"), 1), params.get("cpu_query"), params.get("memory_query"))),
     "huawei_get_cce_node_metrics_topN": (("region", "cluster_id"), lambda params: _metric_action(cce_metrics.get_cce_node_metrics_topN, params["region"], params["cluster_id"], params.get("ak"), params.get("sk"), params.get("project_id"), _to_int(params.get("top_n"), 10), _to_int(params.get("hours"), 1), params.get("cpu_query"), params.get("memory_query"), params.get("disk_query"))),
@@ -597,6 +757,21 @@ ACTION_SPECS: Dict[str, tuple[tuple[str, ...], Handler]] = {
     "huawei_network_verify_pod_scheduling": (("region", "cluster_id", "workload_name"), _network_verify_pod_scheduling_action),
     "huawei_node_batch_diagnose": (("region", "cluster_id"), _node_batch_diagnose_action),
     "huawei_node_diagnose": (("region", "cluster_id"), _node_diagnose_action),
+
+    # HSS vulnerability management
+    "huawei_hss_list_vul_host_hosts": (("region",), _hss_list_vul_host_hosts),
+    "huawei_hss_list_host_vuls": (("region", "host_id"), _hss_list_host_vuls),
+    "huawei_hss_list_host_vuls_all": (("region", "host_id"), _hss_list_host_vuls_all),
+    "huawei_hss_change_vul_status": (("region",), _hss_change_vul_status),
+
+    # CCE node operations
+    "huawei_cce_node_cordon": (("region", "cluster_id", "node_name"), _cce_node_cordon),
+    "huawei_cce_node_uncordon": (("region", "cluster_id", "node_name"), _cce_node_uncordon),
+    "huawei_cce_node_drain": (("region", "cluster_id", "node_name"), _cce_node_drain),
+    "huawei_cce_node_status": (("region", "cluster_id", "node_name"), _cce_node_status),
+
+    # ECS operations
+    "huawei_reboot_ecs": (("region", "instance_id"), _reboot_ecs),
 }
 
 

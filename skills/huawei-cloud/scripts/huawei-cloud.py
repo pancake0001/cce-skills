@@ -292,6 +292,10 @@ def main():
 def _dispatch_modular_action(action: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Attempt modular dispatch first and fall back to legacy dispatch when needed."""
     try:
+        # Ensure local huawei_cloud package is importable
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        if script_dir not in sys.path:
+            sys.path.insert(0, script_dir)
         from huawei_cloud.dispatcher import dispatch_action, is_registered_action
     except Exception as exc:
         return {

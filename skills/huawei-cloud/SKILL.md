@@ -493,6 +493,80 @@ python3 huawei-cloud.py huawei_list_log_groups region=cn-north-4
 python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 ```
 
+## 主机安全 (HSS) 与节点漏洞管理
+
+### 工具列表
+
+| 工具 | 功能 |
+|------|------|
+| `huawei_hss_list_vul_host_hosts` | 查询所有主机的漏洞概览 |
+| `huawei_hss_list_host_vuls` | 查询指定主机漏洞详情 |
+| `huawei_hss_list_host_vuls_all` | 查询指定主机漏洞（全量自动翻页）|
+| `huawei_hss_change_vul_status` | 修改漏洞状态（忽略/修复/验证）|
+| `huawei_cce_node_cordon` | 标记节点不可调度（cordon）|
+| `huawei_cce_node_uncordon` | 恢复节点可调度（uncordon）|
+| `huawei_cce_node_drain` | 驱逐节点Pod（drain）|
+| `huawei_cce_node_status` | 查询节点调度状态 |
+| `huawei_reboot_ecs` | 重启ECS实例 |
+
+### HSS 漏洞状态说明
+
+| 状态 | 含义 | 处理方式 |
+|------|------|---------|
+| `vul_status_unhandled` | 未处理 | `immediate_repair` 修复 |
+| `vul_status_fix` | 已修复 | 无需操作 |
+| `vul_status_reboot` | 需重启 | 修复 + ECS重启 |
+| `vul_status_ignored` | 已忽略 | 无需操作 |
+
+### ⚠️ 关键约束：data_list 与 host_data_list 互斥
+
+`huawei_hss_change_vul_status` 中 `data_list`（漏洞视角）和 `host_data_list`（主机视角）**不能同时传递**，同时传递会导致 HSS.0004 错误。
+
+决策规则：
+- 传入 `host_ids` → 仅使用 `host_data_list`（主机视图）
+- 仅传 `vul_ids` → 仅使用 `data_list`（漏洞视图）
+- 同时传 → `host_ids` 优先
+
+### 节点漏洞修复工作流
+
+```bash
+# 1. 巡检节点漏洞
+python3 huawei-cloud.py huawei_hss_list_host_vuls_all region=cn-north-4 host_id=<host_id>
+
+# 2. 排水（cordon + drain）
+python3 huawei-cloud.py huawei_cce_node_cordon region=cn-north-4 cluster_id=<id> node_name=<ip>
+python3 huawei-cloud.py huawei_cce_node_drain region=cn-north-4 cluster_id=<id> node_name=<ip>
+
+# 3. 修复漏洞（预览）
+python3 huawei-cloud.py huawei_hss_change_vul_status region=cn-north-4 operate_type=immediate_repair host_ids=<host_id>
+
+# 4. 确认修复
+python3 huawei-cloud.py huawei_hss_change_vul_status region=cn-north-4 operate_type=immediate_repair host_ids=<host_id> vul_ids=<ids> confirm=true
+
+# 5. 重启节点（如有 reboot 类漏洞）
+python3 huawei-cloud.py huawei_reboot_ecs instance_id=<ecs_instance_id>
+
+# 6. 恢复调度
+python3 huawei-cloud.py huawei_cce_node_uncordon region=cn-north-4 cluster_id=<id> node_name=<ip>
+```
+
+### HSS 错误码速查
+
+| 错误码 | 含义 | 处理建议 |
+|--------|------|---------|
+| HSS.0004 | 服务端数据库异常 | 非请求问题，等待后重试 |
+| HSS.0191 | 主机未开启防护 | 先开启HSS防护 |
+| HSS.1059 | 漏洞状态不允许操作 | 使用 `list_host_vuls` 确认状态 |
+| HSS.1060 | 修复失败 | 检查HSS Agent状态 |
+| HSS.1061 | 漏洞正在修复中 | 等待完成后重试 |
+
+详细文档：
+- 完整方案：`cce-node-vul-autofix/docs/SOLUTION.md`
+- 快速执行：`cce-node-vul-autofix/docs/WORKFLOW.md`
+- 调试经验：`cce-node-vul-autofix/docs/DEBUG_NOTES.md`
+- 紧急修复：`cce-node-vul-autofix/docs/EMERGENCY_FIX.md`
+- IP映射：`cce-node-vul-autofix/docs/NODE_MAPPING.md`
+
 ## Notes
 - Ensure your AK/SK has proper IAM permissions for the requested resources
 - Different regions may have different resource availability
