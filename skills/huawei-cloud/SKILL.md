@@ -108,6 +108,7 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_stop_ecs_instance` | 关闭（关机）ECS实例（需 confirm=true） |
 | `huawei_start_ecs_instance` | 启动（开机）ECS实例 |
 | `huawei_list_flavors` | 查询区域内可用的ECS实例规格 |
+| `huawei_reboot_ecs` | 重启ECS实例（SOFT/HARD） |
 
 **参数说明：**
 - `region` (required): 华为云区域 (e.g., cn-north-4, cn-east-3)
@@ -193,6 +194,10 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_get_cce_nodes` | 获取指定节点详细信息 |
 | `huawei_list_cce_nodepools` | 查询集群内所有节点池列表 |
 | `huawei_resize_cce_nodepool` | 调整节点池节点数量（扩缩容） |
+| `huawei_cce_node_cordon` | 标记节点不可调度（cordon） |
+| `huawei_cce_node_uncordon` | 恢复节点可调度（uncordon） |
+| `huawei_cce_node_drain` | 驱逐节点 Pod（drain） |
+| `huawei_cce_node_status` | 查询节点调度状态 |
 | `huawei_delete_cce_node` | 从集群删除指定节点 |
 | `huawei_delete_cce_cluster` | 删除整个CCE集群 |
 | `huawei_hibernate_cce_cluster` | 休眠CCE集群（停止计费、保留配置） |
@@ -503,105 +508,13 @@ python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 | `huawei_hss_list_host_vuls` | 查询指定主机漏洞详情 |
 | `huawei_hss_list_host_vuls_all` | 查询指定主机漏洞（全量自动翻页）|
 | `huawei_hss_change_vul_status` | 修改漏洞状态（忽略/修复/验证）|
-| `huawei_cce_node_cordon` | 标记节点不可调度（cordon）|
-| `huawei_cce_node_uncordon` | 恢复节点可调度（uncordon）|
-| `huawei_cce_node_drain` | 驱逐节点Pod（drain）|
-| `huawei_cce_node_status` | 查询节点调度状态 |
-| `huawei_reboot_ecs` | 重启ECS实例 |
 
-### HSS 漏洞状态说明
+> CCE 节点操作（cordon / drain / uncordon / reboot）属于对应章节，详见 ☸️ CCE 云容器引擎 → 节点管理。
 
-#### ⚠️ `vul_status_unhandled` vs `vul_status_unfix` 的真实行为（API实测）
+### 漏洞状态
 
-| 行为 | `vul_status_unhandled` | `vul_status_unfix` |
-|------|------------------------|--------------------|
-| **status 过滤行为** | 返回**所有漏洞**（= 无过滤，等同于不传 status） | 仅返回 `vul_status_unfix` 状态的漏洞 |
-| **包含 fixed?** | 是（包含所有状态） | 否 |
-| **j6mjj 实测** | 108个（= 无过滤） | 107个 |
-
-**结论：`vul_status_unhandled` 是查询所有漏洞的别名，不是过滤条件。真正的状态过滤只有 `vul_status_unfix` 是有效的。**
-
-> 你的猜测方向正确：`vul_status_unhandled` 是对所有状态的一个兜底封装，但实际行为是返回全部漏洞。
-
-#### `vul_num_with_repair_priority_list` vs `severity_level`（两套严重度体系）
-
-`list_vul_host_hosts` 的 `vul_num_with_repair_priority_list` 和 `list_host_vuls` 的 `severity_level` 是**两套独立的严重度分类**，不要混淆：
-
-| 来源 | 字段 | 分类体系 | j6mjj 统计 |
-|------|------|---------|-----------|
-| **Console 显示** | `repair_priority` | 修复优先级 | High:26 / Medium:70 / Low:11 = **107** |
-| `list_host_vuls` | `severity_level` | CVE NVD 官方严重度 | Critical:8 / High:57 / Medium:40 / Low:3 = **108** |
-
-#### `huawei_hss_list_vul_host_hosts` 字段说明
-
-| 字段 | 数据来源 | 说明 |
-|------|---------|------|
-| `total_vul_num` / `high_vul_num` / `medium_vul_num` / `low_vul_num` | `vul_num_with_repair_priority_list`（repair_priority） | **匹配 Console 显示**，修复优先级分类 |
-| `unfix_total` / `unfix_high` 等 | `list_host_vuls` status=`vul_status_unfix` | 仅 `vul_status_unfix` 漏洞数，CVE 严重度分类 |
-| `agent_status` | 直接字段 | HSS Agent 在线状态 |
-| `protect_status` | 直接字段 | 主机防护开启状态 |
-
-**注意：SDK 类中不存在 `total_vul_num`/`high_vul_num` 等直接字段，必须从 `vul_num_with_repair_priority_list` 解析。**
-
-#### 状态值完整列表
-
-| 状态 | 含义 | `list_host_vuls` 过滤有效？ |
-|------|------|---------------------------|
-| `vul_status_unhandled` | 所有漏洞（= 无过滤） | ❌ 返回全部（含 fixed/unfix） |
-| `vul_status_unfix` | 需要手动修复 | ✅ 正确过滤 |
-| `vul_status_fix` | 已修复 | ⚠️ 待验证 |
-| `vul_status_reboot` | 需重启 | ⚠️ 待验证 |
-| `vul_status_ignored` | 已忽略 | ⚠️ 待验证 |
-| `vul_status_fixing` | 修复中 | ⚠️ 待验证 |
-
-### ⚠️ 关键约束：data_list 与 host_data_list 互斥
-
-`huawei_hss_change_vul_status` 中 `data_list`（漏洞视角）和 `host_data_list`（主机视角）**不能同时传递**，同时传递会导致 HSS.0004 错误。
-
-决策规则：
-- 传入 `host_ids` → 仅使用 `host_data_list`（主机视图）
-- 仅传 `vul_ids` → 仅使用 `data_list`（漏洞视图）
-- 同时传 → `host_ids` 优先
-
-### 节点漏洞修复工作流
-
-```bash
-# 1. 巡检节点漏洞
-python3 huawei-cloud.py huawei_hss_list_host_vuls_all region=cn-north-4 host_id=<host_id>
-
-# 2. 排水（cordon + drain）
-python3 huawei-cloud.py huawei_cce_node_cordon region=cn-north-4 cluster_id=<id> node_name=<ip>
-python3 huawei-cloud.py huawei_cce_node_drain region=cn-north-4 cluster_id=<id> node_name=<ip>
-
-# 3. 修复漏洞（预览）
-python3 huawei-cloud.py huawei_hss_change_vul_status region=cn-north-4 operate_type=immediate_repair host_ids=<host_id>
-
-# 4. 确认修复
-python3 huawei-cloud.py huawei_hss_change_vul_status region=cn-north-4 operate_type=immediate_repair host_ids=<host_id> vul_ids=<ids> confirm=true
-
-# 5. 重启节点（如有 reboot 类漏洞）
-python3 huawei-cloud.py huawei_reboot_ecs instance_id=<ecs_instance_id>
-
-# 6. 恢复调度
-python3 huawei-cloud.py huawei_cce_node_uncordon region=cn-north-4 cluster_id=<id> node_name=<ip>
-```
-
-### HSS 错误码速查
-
-| 错误码 | 含义 | 处理建议 |
-|--------|------|---------|
-| HSS.0004 | 服务端数据库异常 | 非请求问题，等待后重试 |
-| HSS.0191 | 主机未开启防护 | 先开启HSS防护 |
-| HSS.1059 | 漏洞状态不允许操作 | 使用 `list_host_vuls` 确认状态 |
-| HSS.1060 | 修复失败 | 检查HSS Agent状态 |
-| HSS.1061 | 漏洞正在修复中 | 等待完成后重试 |
-
-详细文档：
-- 完整方案：`cce-node-vul-autofix/docs/SOLUTION.md`
-- 快速执行：`cce-node-vul-autofix/docs/WORKFLOW.md`
-- 调试经验：`cce-node-vul-autofix/docs/DEBUG_NOTES.md`
-- 紧急修复：`cce-node-vul-autofix/docs/EMERGENCY_FIX.md`
-- IP映射：`cce-node-vul-autofix/docs/NODE_MAPPING.md`
+> 官方 8 种漏洞状态：`unfix` / `ignored` / `verified` / `fixing` / `fixed` / `reboot` / `failed` / `fix_after_reboot`。
+> 节点漏洞修复详细指南见 [CCE_NODE_VUL_FIX.md](./references/CCE_NODE_VUL_FIX.md)。
 
 ## Notes
 - Ensure your AK/SK has proper IAM permissions for the requested resources
@@ -611,6 +524,7 @@ python3 huawei-cloud.py huawei_cce_node_uncordon region=cn-north-4 cluster_id=<i
 - CCE cluster operations require appropriate Kubernetes RBAC permissions
 
 ## References
-## References
+
+- [CCE节点漏洞修复指南](./references/CCE_NODE_VUL_FIX.md)
 - [CCE安全组配置说明](./references/CCE_Security_Group_Configuration.md)
 - [CCE节点故障检测策略配置指南](./references/CCE_Node_Fault_Detection_Configuration.md)
