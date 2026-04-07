@@ -624,6 +624,19 @@ def _cce_node_operation(params: Dict[str, str], operation: str) -> Dict[str, Any
             core_v1.patch_node(node_name, {'spec': {'unschedulable': None}})
             return {"success": True, "operation": "uncordon", "node": node_name, "message": "Node marked as schedulable"}
         elif operation == 'drain':
+            if params.get('confirm', '').lower() != 'true':
+                pods_preview = core_v1.list_pod_for_all_namespaces(field_selector=f'spec.nodeName={node_name}').items
+                affected = [f"{p.metadata.namespace}/{p.metadata.name}" for p in pods_preview
+                            if p.metadata.namespace not in ('kube-system', 'hss', 'monitoring')]
+                return {
+                    "success": False,
+                    "requires_confirmation": True,
+                    "operation": "drain",
+                    "node": node_name,
+                    "affected_pods": affected,
+                    "error": f"Drain operation will delete {len(affected)} non-system pods on node {node_name}.",
+                    "hint": f"Add confirm=true parameter to confirm. Example: huawei_cce_node_drain region=cn-north-4 cluster_id=xxx node_name=192.168.x.x confirm=true"
+                }
             skip_ns = set(['kube-system', 'hss', 'monitoring'])
             grace = 30
             pods = core_v1.list_pod_for_all_namespaces(field_selector=f'spec.nodeName={node_name}').items
@@ -662,6 +675,15 @@ def _reboot_ecs(params: Dict[str, str]) -> Dict[str, Any]:
     if not instance_id:
         return {"success": False, "error": "instance_id is required"}
     reboot_type = params.get("reboot_type", "SOFT").upper()
+    if params.get('confirm', '').lower() != 'true':
+        return {
+            "success": False,
+            "requires_confirmation": True,
+            "instance_id": instance_id,
+            "reboot_type": reboot_type,
+            "error": f"ECS reboot will forcibly restart instance {instance_id}. Unsaved data may be lost.",
+            "hint": f"Add confirm=true parameter to confirm. Example: huawei_reboot_ecs region=cn-north-4 instance_id=xxx confirm=true reboot_type=SOFT"
+        }
     creds = common.get_credentials(params.get("ak"), params.get("sk"))
     access_key, secret_key, project_id = creds[0], creds[1], creds[2] if len(creds) > 2 else None
     if not access_key or not secret_key:
@@ -750,6 +772,7 @@ ACTION_SPECS: Dict[str, tuple[tuple[str, ...], Handler]] = {
     "huawei_biz_pod_monitoring_inspection": (("region", "cluster_id"), _biz_pod_inspection_action),
     "huawei_node_status_inspection": (("region", "cluster_id"), lambda params: _inspection_check_action(cce_inspection.node_status_inspection, params)),
     "huawei_node_resource_inspection": (("region", "cluster_id"), _node_resource_inspection_action),
+    "huawei_node_vul_inspection": (("region", "cluster_id"), lambda params: _inspection_check_action(cce_inspection.node_vul_inspection, params)),
     "huawei_event_inspection": (("region", "cluster_id"), lambda params: _inspection_check_action(cce_inspection.event_inspection, params)),
     "huawei_aom_alarm_inspection": (("region", "cluster_id"), _aom_alarm_inspection_action),
     "huawei_elb_monitoring_inspection": (("region", "cluster_id"), _elb_monitoring_inspection_action),

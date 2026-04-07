@@ -32,6 +32,8 @@ AK/SK仅支持以下两种方式使用：
 | `huawei_delete_cce_cluster` | 删除 | 删除整个CCE集群 |
 | `huawei_scale_cce_workload` | 扩缩容 | 调整Deployment/StatefulSet副本数 |
 | `huawei_delete_cce_workload` | 删除 | 删除工作负载（Deployment/StatefulSet） |
+| `huawei_reboot_ecs` | 重启 | 重启ECS实例（强制重启风险更高） |
+| `huawei_cce_node_drain` | 驱逐 | 驱逐节点所有Pod，影响业务 |
 
 ### 工作流程
 
@@ -108,7 +110,7 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_stop_ecs_instance` | 关闭（关机）ECS实例（需 confirm=true） |
 | `huawei_start_ecs_instance` | 启动（开机）ECS实例 |
 | `huawei_list_flavors` | 查询区域内可用的ECS实例规格 |
-| `huawei_reboot_ecs` | 重启ECS实例（SOFT/HARD） |
+| `huawei_reboot_ecs` | 重启ECS实例（需 confirm=true） |
 
 **参数说明：**
 - `region` (required): 华为云区域 (e.g., cn-north-4, cn-east-3)
@@ -196,7 +198,7 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_resize_cce_nodepool` | 调整节点池节点数量（扩缩容） |
 | `huawei_cce_node_cordon` | 标记节点不可调度（cordon） |
 | `huawei_cce_node_uncordon` | 恢复节点可调度（uncordon） |
-| `huawei_cce_node_drain` | 驱逐节点 Pod（drain） |
+| `huawei_cce_node_drain` | 驱逐节点 Pod（需 confirm=true） |
 | `huawei_cce_node_status` | 查询节点调度状态 |
 | `huawei_delete_cce_node` | 从集群删除指定节点 |
 | `huawei_delete_cce_cluster` | 删除整个CCE集群 |
@@ -276,7 +278,7 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 
 | 工具 | 模式 | 功能 |
 |------|------|------|
-| `huawei_cce_cluster_inspection` | 串行 | 执行CCE集群完整巡检（8项检查） |
+| `huawei_cce_cluster_inspection` | 串行 | 执行CCE集群完整巡检（9项检查） |
 | `huawei_cce_cluster_inspection_parallel` | 并行 ⚡ | 多线程并行巡检，速度提升3-5倍 |
 | `huawei_cce_cluster_inspection_subagent` | Subagent 🚀 | Subagent分布式并行巡检 |
 | `huawei_aggregate_inspection_results` | 结果汇总 | 汇总Subagent巡检结果 |
@@ -290,6 +292,7 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 | `huawei_biz_pod_monitoring_inspection` | 业务Pod监控 |
 | `huawei_node_status_inspection` | Node状态巡检（节点健康度） |
 | `huawei_node_resource_inspection` | 节点资源使用率巡检 |
+| `huawei_node_vul_inspection` | 节点漏洞巡检（HSS未处理漏洞） |
 | `huawei_event_inspection` | 集群关键事件巡检 |
 | `huawei_aom_alarm_inspection` | AOM活跃告警巡检 |
 | `huawei_elb_monitoring_inspection` | ELB负载均衡监控巡检 |
