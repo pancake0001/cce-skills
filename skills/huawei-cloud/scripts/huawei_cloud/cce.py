@@ -291,7 +291,7 @@ def list_cce_cluster_nodes(region: str, cluster_id: str, ak: Optional[str] = Non
                 # Node spec
                 if hasattr(node, 'spec'):
                     node_info["flavor"] = getattr(node.spec, 'flavor', None)
-                    node_info["server_id"] = getattr(node.spec, 'server_id', None)  # ECS服务器ID
+                    node_info["server_id"] = getattr(node.status, 'server_id', None)  # ECS服务器ID = HSS host_id
                     node_info["availability_zone"] = getattr(node.spec, 'az', None)  # 可用区
                 # Node conditions
                 if hasattr(node, 'status') and hasattr(node.status, 'conditions'):
@@ -385,7 +385,7 @@ def get_cce_nodes(region: str, cluster_id: str, node_name: Optional[str] = None,
                 # Node spec
                 if hasattr(node, 'spec'):
                     node_info["flavor"] = getattr(node.spec, 'flavor', None)
-                    node_info["server_id"] = getattr(node.spec, 'server_id', None)  # ECS服务器ID
+                    node_info["server_id"] = getattr(node.status, 'server_id', None)  # ECS服务器ID = HSS host_id
                     node_info["availability_zone"] = getattr(node.spec, 'az', None)  # 可用区
                 # Node conditions
                 if hasattr(node, 'status') and hasattr(node.status, 'conditions'):
