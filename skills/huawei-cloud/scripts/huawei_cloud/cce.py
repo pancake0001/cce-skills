@@ -286,6 +286,7 @@ def list_cce_cluster_nodes(region: str, cluster_id: str, ak: Optional[str] = Non
                     "name": node.metadata.name,
                     "status": node.status.phase if hasattr(node, 'status') and hasattr(node.status, 'phase') else 'Unknown',
                     "created_at": str(node.metadata.creation_timestamp) if hasattr(node, 'metadata') and hasattr(node.metadata, 'creation_timestamp') else None,
+                    "labels": dict(node.metadata.labels) if hasattr(node.metadata, 'labels') and node.metadata.labels else {},
                 }
                 # Node spec
                 if hasattr(node, 'spec'):

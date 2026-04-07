@@ -295,7 +295,7 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 | `huawei_biz_pod_monitoring_inspection` | 业务Pod监控 |
 | `huawei_node_status_inspection` | Node状态巡检（节点健康度） |
 | `huawei_node_resource_inspection` | 节点资源使用率巡检 |
-| `huawei_node_vul_inspection` | 节点漏洞巡检（HSS未处理漏洞） |
+| `huawei_node_vul_inspection` | 节点漏洞巡检（含OS版本、内核版本、未处理漏洞数） |
 | `huawei_event_inspection` | 集群关键事件巡检 |
 | `huawei_aom_alarm_inspection` | AOM活跃告警巡检 |
 | `huawei_elb_monitoring_inspection` | ELB负载均衡监控巡检 |
@@ -511,7 +511,6 @@ python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 | 工具 | 功能 |
 |------|------|
 | `huawei_hss_list_vul_host_hosts` | 查询所有主机的漏洞概览 |
-| `huawei_hss_list_host_vuls` | 查询指定主机漏洞详情 |
 | `huawei_hss_list_host_vuls_all` | 查询指定主机漏洞（全量自动翻页）|
 | `huawei_hss_change_vul_status` | 修改漏洞状态（忽略/修复/验证）|
 

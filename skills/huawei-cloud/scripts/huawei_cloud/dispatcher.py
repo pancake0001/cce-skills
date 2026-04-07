@@ -518,21 +518,6 @@ def _list_cce_cronjobs(params: Dict[str, str]) -> Dict[str, Any]:
 def _hss_list_vul_host_hosts(params: Dict[str, str]) -> Dict[str, Any]:
     return hss.list_vul_host_hosts(region=params["region"], ak=params.get("ak"), sk=params.get("sk"))
 
-def _hss_list_host_vuls(params: Dict[str, str]) -> Dict[str, Any]:
-    return hss.list_host_vuls(
-        region=params["region"],
-        ak=params.get("ak"),
-        sk=params.get("sk"),
-        host_id=params.get("host_id"),
-        host_name=params.get("host_name"),
-        status=params.get("status"),
-        repair_priority=params.get("repair_priority"),
-        severity_level=params.get("severity_level"),
-        limit=int(params.get("limit", 100)),
-        offset=int(params.get("offset", 0)),
-        enterprise_project_id=params.get("enterprise_project_id", "all_granted_eps"),
-    )
-
 def _hss_list_host_vuls_all(params: Dict[str, str]) -> Dict[str, Any]:
     return hss.list_host_vuls_all(
         region=params["region"],
@@ -815,7 +800,6 @@ ACTION_SPECS: Dict[str, tuple[tuple[str, ...], Handler]] = {
 
     # HSS vulnerability management
     "huawei_hss_list_vul_host_hosts": (("region",), _hss_list_vul_host_hosts),
-    "huawei_hss_list_host_vuls": (("region", "host_id"), _hss_list_host_vuls),
     "huawei_hss_list_host_vuls_all": (("region", "host_id"), _hss_list_host_vuls_all),
     "huawei_hss_change_vul_status": (("region",), _hss_change_vul_status),
 

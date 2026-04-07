@@ -616,11 +616,23 @@ def node_vul_inspection(region: str, cluster_id: str, ak: str, sk: str, project_
         for node in nodes:
             server_id = node.get("server_id")  # ECS instance ID = HSS host_id
             node_name = node.get("name", "unknown")
+            labels = node.get("labels", {})
+            
+            # OS / Kernel 版本（来自 K8s node labels）
+            os_version = labels.get("node.kubernetes.io/os_version", "")
+            kernel_version = labels.get("node.kubernetes.io/kernel_version", "")
+            # 兼容 CCE 特有标签
+            if not os_version:
+                os_version = labels.get("CCE.DECK/OS_VERSION", "")
+            if not kernel_version:
+                kernel_version = labels.get("CCE.DECK/KERNEL_VERSION", "")
             
             vul_info = {
                 "node_name": node_name,
                 "server_id": server_id,
                 "status": node.get("status"),
+                "os_version": os_version,
+                "kernel_version": kernel_version,
                 "in_hss": server_id in hss_hosts,
                 "total_vul_num": 0,
                 "unfix_total": 0,
@@ -650,13 +662,16 @@ def node_vul_inspection(region: str, cluster_id: str, ak: str, sk: str, project_
                 result["high_risk_nodes"].append({
                     "node_name": node_name,
                     "server_id": server_id,
+                    "os_version": os_version,
+                    "kernel_version": kernel_version,
                     "unfix_total": vul_info["unfix_total"],
                     "unfix_high": vul_info["unfix_high"],
                     "unfix_medium": vul_info["unfix_medium"],
                 })
                 sev = "CRITICAL" if vul_info["unfix_high"] > 0 else "WARNING"
+                os_info = f"OS:{os_version} kernel:{kernel_version}" if os_version or kernel_version else ""
                 add_issue(sev, "节点漏洞", node_name,
-                    f"节点 {node_name} 存在 {vul_info['unfix_total']} 个未处理漏洞"
+                    f"节点 {node_name} {os_info} 存在 {vul_info['unfix_total']} 个未处理漏洞"
                     f"（高:{vul_info['unfix_high']} / 中:{vul_info['unfix_medium']} / 低:{vul_info['unfix_low']}）")
         
         if result["high_risk_nodes"]:
