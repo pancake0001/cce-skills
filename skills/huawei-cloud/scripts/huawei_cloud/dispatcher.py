@@ -548,158 +548,35 @@ def _hss_change_vul_status(params: Dict[str, str]) -> Dict[str, Any]:
     )
 
 
-# ---- CCE node operation helpers ----
-def _create_k8s_client_from_kubeconfig(kubeconfig_data: dict):
-    import tempfile, os
-    kubeconfig_str = kubeconfig_data.get("kubeconfig") or kubeconfig_data.get("content", "")
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.kubeconfig', delete=False) as f:
-        f.write(kubeconfig_str)
-        kubeconfig_path = f.name
-    try:
-        import kubernetes
-        from kubernetes.client import Configuration
-        from kubernetes.config import load_kube_config
-        load_kube_config(config_file=kubeconfig_path)
-        configuration = Configuration.get_default_copy()
-        configuration.verify_ssl = False
-        Configuration.set_default(configuration)
-        return kubernetes.client, configuration, kubeconfig_path
-    except Exception:
-        from kubernetes import client
-        try:
-            configuration = type('Cfg', (), {
-                'host': kubeconfig_data.get('api_server'),
-                'verify_ssl': False,
-                'api_key': {'authorization': 'Bearer ' + kubeconfig_data.get('token', '')}
-            })()
-            client.Configuration.set_default(configuration)
-            return client, configuration, kubeconfig_path
-        except Exception:
-            return None, None, kubeconfig_path
-
-
-def _cce_node_operation(params: Dict[str, str], operation: str) -> Dict[str, Any]:
-    import kubernetes as k8s, kubernetes.client, os
-    region = params["region"]
-    cluster_id = params["cluster_id"]
-    node_name = params["node_name"]
-    creds = common.get_credentials(params.get("ak"), params.get("sk"))
-    access_key, secret_key, project_id = creds[0], creds[1], creds[2] if len(creds) > 2 else None
-    if not access_key or not secret_key:
-        return {"success": False, "error": "Missing credentials"}
-    try:
-        cce_client = common.create_cce_client(region, access_key, secret_key, project_id)
-        from huaweicloudsdkcce.v3 import CreateKubernetesClusterCertRequest, ClusterCertDuration
-        cert_req = CreateKubernetesClusterCertRequest(cluster_id=cluster_id)
-        cert_req.body = ClusterCertDuration(duration=1)
-        kubeconfig_data = cce_client.create_kubernetes_cluster_cert(cert_req).to_dict()
-        _, _, cert_file = _create_k8s_client_from_kubeconfig(kubeconfig_data)
-        k8s.client.Configuration.set_default(k8s.client.Configuration())
-        core_v1 = k8s.client.CoreV1Api()
-        if operation == 'status':
-            node = core_v1.read_node(node_name)
-            conditions = {c.type: c.status for c in node.status.conditions}
-            return {"success": True, "operation": "status", "node": node_name,
-                    "schedulable": node.spec.unschedulable is None,
-                    "ready": conditions.get("Ready") == "True", "conditions": conditions}
-        elif operation == 'cordon':
-            if params.get('confirm', '').lower() != 'true':
-                return {
-                    "success": False,
-                    "requires_confirmation": True,
-                    "operation": "cordon",
-                    "node": node_name,
-                    "error": f"Cordon will mark node {node_name} as unschedulable. Existing Pods will not be evicted but no new pods will be assigned.",
-                    "hint": f"Add confirm=true to confirm. Example: huawei_cce_node_cordon region=cn-north-4 cluster_id=xxx node_name=192.168.x.x confirm=true"
-                }
-            core_v1.patch_node(node_name, {'spec': {'unschedulable': True}})
-            return {"success": True, "operation": "cordon", "node": node_name, "message": "Node marked as unschedulable"}
-        elif operation == 'uncordon':
-            if params.get('confirm', '').lower() != 'true':
-                return {
-                    "success": False,
-                    "requires_confirmation": True,
-                    "operation": "uncordon",
-                    "node": node_name,
-                    "error": f"Uncordon will mark node {node_name} as schedulable. New pods may be immediately assigned to this node.",
-                    "hint": f"Add confirm=true to confirm. Example: huawei_cce_node_uncordon region=cn-north-4 cluster_id=xxx node_name=192.168.x.x confirm=true"
-                }
-            core_v1.patch_node(node_name, {'spec': {'unschedulable': None}})
-            return {"success": True, "operation": "uncordon", "node": node_name, "message": "Node marked as schedulable"}
-        elif operation == 'drain':
-            if params.get('confirm', '').lower() != 'true':
-                pods_preview = core_v1.list_pod_for_all_namespaces(field_selector=f'spec.nodeName={node_name}').items
-                affected = [f"{p.metadata.namespace}/{p.metadata.name}" for p in pods_preview
-                            if p.metadata.namespace not in ('kube-system', 'hss', 'monitoring')]
-                return {
-                    "success": False,
-                    "requires_confirmation": True,
-                    "operation": "drain",
-                    "node": node_name,
-                    "affected_pods": affected,
-                    "error": f"Drain operation will delete {len(affected)} non-system pods on node {node_name}.",
-                    "hint": f"Add confirm=true parameter to confirm. Example: huawei_cce_node_drain region=cn-north-4 cluster_id=xxx node_name=192.168.x.x confirm=true"
-                }
-            skip_ns = set(['kube-system', 'hss', 'monitoring'])
-            grace = 30
-            pods = core_v1.list_pod_for_all_namespaces(field_selector=f'spec.nodeName={node_name}').items
-            deleted, skipped = [], []
-            for p in pods:
-                ns, pname = p.metadata.namespace, p.metadata.name
-                if ns in skip_ns:
-                    skipped.append(f"{ns}/{pname}"); continue
-                try:
-                    body = k8s.client.V1DeleteOptions(grace_period_seconds=grace)
-                    core_v1.delete_namespaced_pod(pname, ns, body=body)
-                    deleted.append(f"{ns}/{pname}")
-                except Exception as e:
-                    skipped.append(f"{ns}/{pname} ({e})"[:100])
-            return {"success": True, "operation": "drain", "node": node_name, "deleted": deleted, "skipped": skipped}
-    finally:
-        if cert_file and os.path.exists(cert_file):
-            os.unlink(cert_file)
-
 def _cce_node_cordon(params: Dict[str, str]) -> Dict[str, Any]:
-    return _cce_node_operation(params, "cordon")
+    return cce.cce_node_cordon(
+        region=params["region"], cluster_id=params["cluster_id"], node_name=params["node_name"],
+        confirm=params.get("confirm", "").lower() == "true",
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"))
 
 def _cce_node_uncordon(params: Dict[str, str]) -> Dict[str, Any]:
-    return _cce_node_operation(params, "uncordon")
+    return cce.cce_node_uncordon(
+        region=params["region"], cluster_id=params["cluster_id"], node_name=params["node_name"],
+        confirm=params.get("confirm", "").lower() == "true",
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"))
 
 def _cce_node_drain(params: Dict[str, str]) -> Dict[str, Any]:
-    return _cce_node_operation(params, "drain")
+    return cce.cce_node_drain(
+        region=params["region"], cluster_id=params["cluster_id"], node_name=params["node_name"],
+        confirm=params.get("confirm", "").lower() == "true",
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"))
 
 def _cce_node_status(params: Dict[str, str]) -> Dict[str, Any]:
-    return _cce_node_operation(params, "status")
+    return cce.cce_node_status(
+        region=params["region"], cluster_id=params["cluster_id"], node_name=params["node_name"],
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"))
 
-
-# ---- ECS reboot ----
 def _reboot_ecs(params: Dict[str, str]) -> Dict[str, Any]:
-    instance_id = params.get("instance_id")
-    if not instance_id:
-        return {"success": False, "error": "instance_id is required"}
-    reboot_type = params.get("reboot_type", "SOFT").upper()
-    if params.get('confirm', '').lower() != 'true':
-        return {
-            "success": False,
-            "requires_confirmation": True,
-            "instance_id": instance_id,
-            "reboot_type": reboot_type,
-            "error": f"ECS reboot will forcibly restart instance {instance_id}. Unsaved data may be lost.",
-            "hint": f"Add confirm=true parameter to confirm. Example: huawei_reboot_ecs region=cn-north-4 instance_id=xxx confirm=true reboot_type=SOFT"
-        }
-    creds = common.get_credentials(params.get("ak"), params.get("sk"))
-    access_key, secret_key, project_id = creds[0], creds[1], creds[2] if len(creds) > 2 else None
-    if not access_key or not secret_key:
-        return {"success": False, "error": "Missing credentials"}
-    from huaweicloudsdkecs.v2 import BatchRebootServersRequest
-    req = BatchRebootServersRequest()
-    req.body = {"servers": [{"id": instance_id}], "type": reboot_type}
-    try:
-        cce_cli = common.create_cce_client(params["region"], access_key, secret_key, project_id)
-        result = cce_cli.batch_reboot_servers(req)
-        return {"success": True, "instance_id": instance_id, "reboot_type": reboot_type, "result": str(result)}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    return ecs.reboot_ecs_instance(
+        region=params["region"], instance_id=params["instance_id"],
+        reboot_type=params.get("reboot_type", "SOFT"),
+        confirm=params.get("confirm", "").lower() == "true",
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"))
 
 
 ACTION_SPECS: Dict[str, tuple[tuple[str, ...], Handler]] = {
