@@ -1,128 +1,151 @@
 # CCE 节点漏洞修复指南
 
-## 1. 漏洞状态（官方定义）
+> 📅 **更新：2026-04-08** — 基于 test-cce-ai-diagnose 集群真实修复事故经验更新
 
-来源：[ShowVulReportData —华为云 HSS API](https://support.huaweicloud.com/api-hss2.0/ShowVulReportData.html)
+---
+
+## 1. 核心教训（必读）
+
+### ⚠️ `immediate_repair` 是异步 API — 这一点至关重要
+
+调用 `change_vul_status(operate_type=immediate_repair)` 后：
+
+1. API **立即返回 200**（请求被接受）
+2. 漏洞状态从 `unfix` → `fixing`（修复进行中）
+3. HSS Agent 在节点上**异步下载并安装补丁**
+4. **对于需要重启的漏洞**，补丁安装完成后状态仍为 `fixing`，**必须重启节点**才能使修复生效，状态才变为 `fixed`
+
+**如果跳过 reboot_ecs：**
+- 漏洞状态卡在 `fixing`（看起来"正在修复"）
+- 用户以为"已在修复中" → 实际系统根本没修好
+- **这是最危险的情况：虚假安全感**
+
+### ⚠️ reboot_ecs 绝对不能跳过
+
+kernel/bpftool/kernel-tools 类漏洞（HCE2-SA-2025-0327 等）：
+- 修复方式：`yum update kernel && reboot`
+- 补丁安装完成后必须**重启节点**才能使新内核生效
+- 重启是漏洞修复的**必要步骤**，不是可选步骤
+
+### ⚠️ 幂等调用行为
+
+`change_vul_status` 是幂等接口：
+- 首次调用：返回 200，状态 → `fixing`
+- 再次调用（状态仍为 `fixing`）：返回 **HSS.1105**（Unknown error）
+- 再次调用（状态已 `fixed`）：返回 200
+- **遇到 HSS.1105 ≠ 失败**，说明首次调用已成功触发
+
+---
+
+## 2. 漏洞状态（官方定义）
 
 | 状态值 | 含义 | 说明 |
 |--------|------|------|
 | `vul_status_unfix` | 未处理 | 漏洞存在，尚未修复 |
 | `vul_status_ignored` | 已忽略 | 人工忽略 |
 | `vul_status_verified` | 验证中 | 正在验证漏洞 |
-| `vul_status_fixing` | 修复中 | 修复进行中 |
-| `vul_status_fixed` | 已修复 | 已修复 |
-| `vul_status_reboot` | 修复待重启 | 补丁已下载，需重启生效 |
+| `vul_status_fixing` | 修复中 | ⚠️ **补丁安装中，需重启生效** |
+| `vul_status_fixed` | 已修复 | ✅ **已修复（内核漏洞必须重启后才可能变为此状态）** |
+| `vul_status_reboot` | 修复待重启 | 补丁已安装，需重启生效 |
 | `vul_status_failed` | 修复失败 | 修复执行失败 |
 | `vul_status_fix_after_reboot` | 请重启后修复 | 需重启后再次执行修复 |
 
 > **`vul_status_unhandled` 不是官方漏洞状态**，它是"所有漏洞"的别名，实际行为等同于不传 status 参数。过滤未处理漏洞应使用 `vul_status_unfix`。
 
-## 2. 工具列表
+---
 
-### HSS 漏洞查询
-
-| 工具 | 功能 |
-|------|------|
-| `huawei_hss_list_hosts` | 查询所有主机的漏洞概览 |
-| `huawei_hss_list_host_vuls_all` | 查询指定主机漏洞（全量自动翻页）|
-
-### HSS 漏洞操作（均需 confirm）
-
-| 工具 | 功能 |
-|------|------|
-| `huawei_hss_change_vul_status` | 修改漏洞状态（忽略/修复/验证），confirm=true 执行 |
-
-### CCE 节点操作（均需 confirm）
-
-| 工具 | 功能 |
-|------|------|
-| `huawei_cce_node_cordon` | 标记节点不可调度（confirm=true） |
-| `huawei_cce_node_uncordon` | 恢复节点可调度（confirm=true） |
-| `huawei_cce_node_drain` | 驱逐节点 Pod（confirm=true） |
-| `huawei_cce_node_status` | 查询节点调度状态（仅查询） |
-
-### ECS 操作（均需 confirm）
-
-| 工具 | 功能 |
-|------|------|
-| `huawei_reboot_ecs` | 重启 ECS 实例（confirm=true） |
-
-## 3. 漏洞修复完整工作流
+## 3. 完整修复工作流（正确版本）
 
 ```
 阶段一：信息收集
-├── 集群节点列表 → list_cce_cluster_nodes（含 OS 版本、内核版本标签）
+├── 集群节点列表 → huawei_list_cce_nodes（含 server_id）
 ├── 节点漏洞概览 → huawei_hss_list_hosts（匹配 server_id）
 └── 单节点漏洞详情 → huawei_hss_list_host_vuls_all
 
-阶段二：制定修复计划 ← 【执行前必须输出完整计划】
-├── 评估是否涉及重启（reboot 类漏洞）
-├── 评估漏洞修复优先级（High/Medium/Low）
-├── 确定并发度（单节点还是批量）
-├── 制定分批策略（节点排序、分批顺序）
+阶段二：制定修复计划
+├── 确认每个漏洞的修复方式（yum update / reboot）
+├── 确认 reboot 类漏洞存在 → reboot_ecs 必须执行
 └── 与用户协商确认后再执行
 
-阶段三：执行修复（按批次顺序执行）
-├── 前置检查：节点状态、Pod 分布、业务影响评估
-├── 节点排水：cordon → drain（confirm=true）
-├── 漏洞修复：change_vul_status（confirm=true）
-├── 重启（如有 reboot 类漏洞）：reboot_ecs（confirm=true）
-└── 恢复调度：uncordon（confirm=true）
+阶段三：逐节点执行（每个节点必须按顺序完成全部步骤）
+│
+├── 步骤① cordon（标记不可调度）
+│   confirm=true
+│
+├── 步骤② drain（驱逐 Pod）
+│   confirm=true
+│
+├── 步骤③ HSS 触发修复 ← 必须执行
+│   huawei_hss_change_vul_status(operate_type=immediate_repair, confirm=true)
+│   ⚠️ API 返回 200 ≠ 修复完成
+│
+├── 步骤④ reboot_ecs ← 绝对不能跳过
+│   confirm=true
+│   ⚠️ reboot 是 kernel 类漏洞修复的必要步骤
+│   ⚠️ 重启期间节点为 NotReady，K8s 会自动感知
+│
+├── 步骤⑤ 等待节点 Ready
+│   huawei_cce_node_status 确认节点状态恢复
+│   ⚠️ 必须等待节点 Ready 后才能进入下一步
+│
+├── 步骤⑥ uncordon（恢复调度）
+│   confirm=true
+│
+└── 步骤⑦ 验证漏洞状态
+    huawei_hss_list_host_vuls_all
+    ⚠️ 必须在 reboot 后验证，不能在 API 调用后立即验证
+    ⚠️ kernel 类漏洞：reboot 后状态应为 fixed
+    ⚠️ 如仍为 fixing：可能是 HSS Agent 安装失败，需检查节点日志
 
-阶段四：验证与巡检
-├── 漏洞状态验证：list_host_vuls（reboot 类漏洞应为 0）
-├── 节点健康检查：node_status_inspection
-├── 业务 Pod 可用性检查：pod_status_inspection
-└── 如发现非预期影响 → 扩容新节点 + 隔离异常节点
+阶段四：业务恢复确认
+├── 确认业务 Pod 已重建并 Running
+└── 如有异常 → 进入"非预期影响应对"流程
 ```
 
-## 4. 修复计划模板
+### 每个步骤跳过的后果
 
-执行前必须提供以下格式的计划并获用户确认：
+| 步骤 | 跳过后果 |
+|------|---------|
+| ① cordon | drain 时新 Pod 被调度到该节点，重启时业务中断 |
+| ② drain | 业务 Pod 在节点重启时 crash，服务中断 |
+| ③ HSS 触发 | 漏洞根本没触发修复 |
+| ④ reboot_ecs | **kernel 类漏洞卡在 fixing，用户以为在修，实际没修好** |
+| ⑤ 等待 Ready | 节点还没启动完就 uncordon，Pod 调度失败 |
+| ⑥ uncordon | 节点永久不可用 |
+| ⑦ 验证 | 不知道修复到底成功没有 |
 
-```markdown
-# 漏洞修复执行计划
+---
 
-## 基本信息
-- 集群：<cluster_id>
-- 节点数：<N> 台
-- 漏洞总数：<X>（High: <H> / Medium: <M> / Low: <L>）
+## 4. 工具列表
 
-## 修复范围
-| 节点 | OS 版本 | 内核版本 | 漏洞数 | 高危 | 重启类 | 修复优先级 |
-|------|---------|---------|--------|------|--------|----------|
-| node-1 | Ubuntu-22.04 | 5.15.0-113-generic | 10 | 2 | 是 | P0 |
-| node-2 | Ubuntu-22.04 | 5.15.0-107-generic | 5 | 0 | 否 | P1 |
+### CCE 节点操作
 
-## 是否涉及重启
-- 是/否
-- 原因：<具体漏洞名，如 USN-8096-1 需要重启生效>
+| 工具 | 功能 | confirm |
+|------|------|--------|
+| `huawei_cce_node_cordon` | 标记节点不可调度 | ✅ |
+| `huawei_cce_node_uncordon` | 恢复节点可调度 | ✅ |
+| `huawei_cce_node_drain` | 驱逐节点 Pod（非系统） | ✅ |
+| `huawei_cce_node_status` | 查询节点调度状态 | 查询 |
 
-## 分批策略
-- 批次1：node-1（高危，2台高危漏洞）
-- 批次2：node-2、node-3（可并行）
-- ...
+### HSS 漏洞操作
 
-## 并发度
-- 本次修复并发度：1（逐节点执行，避免影响业务）
+| 工具 | 功能 | confirm |
+|------|------|--------|
+| `huawei_hss_list_host_vuls_all` | 查询主机漏洞（全量，自动翻页） | 查询 |
+| `huawei_hss_list_hosts` | 查询所有主机漏洞概览 | 查询 |
+| `huawei_hss_change_vul_status` | 修改漏洞状态（修复/忽略/验证） | ✅ |
 
-## 业务影响评估
-- cordon 后节点不可调度，存量 Pod 不受影响
-- drain 会驱逐非系统 Pod，请确认业务副本数 > 1
+### ECS 操作
 
-## 回退预案
-- 如修复后节点异常，优先扩容新节点承载流量
-- 隔离异常节点：cordon + drain + 从集群移除
+| 工具 | 功能 | confirm |
+|------|------|--------|
+| `huawei_reboot_ecs` | 重启 ECS 实例 | ✅ |
 
-## 确认执行
-请回复「确认执行」开始漏洞修复。
-```
+---
 
 ## 5. 关键约束
 
 ### data_list 与 host_data_list 互斥
-
-`change_vul_status` 请求体中两者**不能同时传递**，同时传递触发 HSS.0004：
 
 | 场景 | 调用方式 |
 |------|---------|
@@ -130,41 +153,54 @@
 | 指定漏洞列表 | `data_list=[VulOperateInfo(vul_id=...) for ...]` |
 | 同时传 | ❌ HSS.0004 |
 
-> `host_ids` 参数传入时自动使用 `host_data_list`，`vul_ids` 参数传入时自动使用 `data_list`。
-
 ### confirm 机制
 
-所有变动类操作（cordon/drain/uncordon/reboot/change_vul_status）均需要 `confirm=true` 才真正执行，否则仅返回预览。
+所有变动类操作（cordon/drain/uncordon/reboot/change_vul_status）均需要 `confirm=true` 才真正执行。
 
-## 6. 两套严重度体系
+---
 
-| 来源 | 字段 | 分类依据 | 说明 |
-|------|------|---------|------|
-| `list_vul_host_hosts` → `vul_num_with_repair_priority_list` | `repair_priority` | 修复优先级 | **匹配 Console 显示**，用于判断是否紧急 |
-| `list_host_vuls` | `severity_level` | CVE NVD CVSS | 官方严重度，用于分批排序 |
+## 6. 错误码速查
 
-**High/Priority 排序参考**：优先处理 High + reboot 类漏洞的节点。
-
-## 7. 错误码速查
-
-| 错误码 | 含义 | 处理建议 |
-|--------|------|---------|
-| HSS.0004 | 数据库操作失败 | 确认 data_list/host_data_list 未同时传 |
+| 错误码 | 含义 | 实际含义与处理 |
+|--------|------|--------------|
+| HSS.0004 | 数据库操作失败 | data_list 和 host_data_list 不能同时传 |
+| HSS.0013 | Insufficient permissions | AK/SK 无 HSS 修复权限，在控制台授权 |
 | HSS.0191 | 主机未开启防护 | 先开启 HSS 防护 |
-| HSS.1059 | 漏洞状态不允许操作 | 使用 list_host_vuls 确认状态为 unfix |
-| HSS.1060 | 修复失败 | 检查 HSS Agent 状态 |
-| HSS.1061 | 漏洞正在修复中 | 等待完成后重试 |
+| HSS.1059 | 漏洞状态不允许操作 | 确认漏洞状态为 unfix 才能触发修复 |
+| HSS.1060 | 修复失败 | 检查 HSS Agent 状态和节点系统日志 |
+| HSS.1061 | 漏洞正在修复中 | 等待修复完成（HSS.1105 也可能同时出现，属正常幂等） |
+| **HSS.1105** | **Unknown error** | ⚠️ **不是失败！是幂等回调信号，首次调用已成功，后续调用被拦截** |
+
+---
+
+## 7. 验证要求
+
+### 验证时机
+
+- **错误做法**：API 调用返回 200 后立即验证 → 此时状态可能还是 fixing
+- **正确做法**：reboot 后等待 2-3 分钟再验证 → kernel 补丁生效后才能看到 fixed
+
+### 验证判断标准
+
+| 漏洞类型 | 修复成功后状态 |
+|---------|--------------|
+| 非内核漏洞（bind/openssl/cups等） | `fixed` 或 `unfix`（取决于 HSS Agent 是否完成安装） |
+| 内核漏洞（HCE2-SA-2025-0327等） | `fixed`（必须在 reboot 后才能变为 fixed） |
+
+---
 
 ## 8. 非预期影响应对
 
 修复过程中如发现业务受影响，按以下顺序处理：
 
 1. **立即 cordon 异常节点**（阻止新 Pod 调度）
-2. **检查节点 Pod 状态**：`huawei_pod_status_inspection`
-3. **扩容新节点**承担当前业务（cce_node_add）
+2. **检查节点 Pod 状态**：`huawei_get_cce_pods`
+3. **扩容新节点**承担当前业务
 4. **驱逐异常节点**上的 Pod（drain）
 5. **分析根因**：检查 HSS 修复日志、节点系统状态
 6. **决策**：继续修复其他节点或暂停本次修复计划
+
+---
 
 ## 9. 其他参考
 

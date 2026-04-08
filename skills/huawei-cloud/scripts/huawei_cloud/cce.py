@@ -3861,6 +3861,9 @@ def _node_operation(region: str, cluster_id: str, node_name: str, operation: str
     if not K8S_AVAILABLE:
         return {"success": False, "error": f"Kubernetes SDK not installed: {K8S_IMPORT_ERROR}"}
 
+    # Temp file paths (must be defined before try block for finally cleanup)
+    ca_cert_file = client_cert_file = client_key_file = None
+
     try:
         # Get cluster kubeconfig
         cce_client = create_cce_client(region, access_key, secret_key, proj_id)
@@ -3877,13 +3880,72 @@ def _node_operation(region: str, cluster_id: str, node_name: str, operation: str
 
         try:
             import kubernetes as k8s
-            k8s.client.Configuration.set_default(k8s.client.Configuration())
-            from kubernetes.client import Configuration
+            from kubernetes.client import Configuration, CoreV1Api
+            import yaml, base64
+
+            # kubeconfig_data structure: SDK returns flat dict (not nested under 'kubeconfig' key)
+            raw_kc = kubeconfig_data.get("kubeconfig") or kubeconfig_data.get("content", "") or kubeconfig_data
+            kc = yaml.safe_load(raw_kc) if isinstance(raw_kc, str) and raw_kc else raw_kc
+            # Get current context and resolve to cluster/user
+            current_ctx = kc.get('current_context', '')
+            ctx_entry = next((c for c in kc.get('contexts', []) if c['name'] == current_ctx), None)
+            if not ctx_entry:
+                return {"success": False, "error": f"Context '{current_ctx}' not found in kubeconfig"}
+            cluster_name = ctx_entry['context']['cluster']
+            user_name = ctx_entry['context']['user']
+
+            # Get cluster config
+            cluster_entry = next((c for c in kc.get('clusters', []) if c['name'] == cluster_name), None)
+            if not cluster_entry:
+                return {"success": False, "error": f"Cluster '{cluster_name}' not found in kubeconfig"}
+            cluster_cfg = cluster_entry['cluster']
+
+            # Get user config
+            user_entry = next((u for u in kc.get('users', []) if u['name'] == user_name), None)
+            if not user_entry:
+                return {"success": False, "error": f"User '{user_name}' not found in kubeconfig"}
+            user_cfg = user_entry['user']
+
+            # Extract server (prefer current context; fallback to clusters[0] for compatibility)
+            server = cluster_cfg.get('server', '')
+
+            # Write certs to temp files
+            ca_cert_file = None
+            client_cert_file = None
+            client_key_file = None
+
+            ca_data = cluster_cfg.get('certificate_authority_data')
+            if ca_data:
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.crt', delete=False) as f:
+                    f.write(base64.b64decode(ca_data).decode())
+                    ca_cert_file = f.name
+
+            cert_data = user_cfg.get('client_certificate_data')
+            key_data = user_cfg.get('client_key_data')
+            if cert_data and key_data:
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.crt', delete=False) as f:
+                    f.write(base64.b64decode(cert_data).decode())
+                    client_cert_file = f.name
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.key', delete=False) as f:
+                    f.write(base64.b64decode(key_data).decode())
+                    client_key_file = f.name
+
+            # Determine if skip TLS verify (only for 'external' context which has insecure_skip_tls_verify=true)
+            skip_tls = cluster_cfg.get('insecure_skip_tls_verify', False)
+
+            # Create configuration with explicit certs
             config = Configuration()
-            config.host = _extract_host(kubeconfig_str)
-            config.verify_ssl = True
-            Configuration.set_default(config)
-            core_v1 = k8s.client.CoreV1Api()
+            config.host = server
+            config.verify_ssl = not skip_tls
+            if ca_cert_file:
+                config.ssl_ca_cert = ca_cert_file
+            if client_cert_file:
+                config.cert_file = client_cert_file
+            if client_key_file:
+                config.key_file = client_key_file
+
+            api_client = k8s.client.ApiClient(config)
+            core_v1 = CoreV1Api(api_client)
 
             if operation == 'status':
                 node = core_v1.read_node(node_name)
@@ -3947,8 +4009,13 @@ def _node_operation(region: str, cluster_id: str, node_name: str, operation: str
             else:
                 return {"success": False, "error": f"Unknown operation: {operation}"}
         finally:
-            if cert_file and os.path.exists(cert_file):
-                os.unlink(cert_file)
+            # Clean up all temp files
+            for f in [ca_cert_file, client_cert_file, client_key_file]:
+                if f and os.path.exists(f):
+                    try:
+                        os.unlink(f)
+                    except Exception:
+                        pass
     except ClientRequestException as e:
         return {"success": False, "error": f"{e.error_code} - {e.error_msg}", "request_id": getattr(e, "request_id", None)}
     except Exception as e:

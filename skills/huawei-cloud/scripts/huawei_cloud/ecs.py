@@ -467,11 +467,13 @@ def reboot_ecs_instance(
         }
 
     try:
-        from huaweicloudsdkecs.v2 import BatchRebootServersRequest, BatchRebootServersRequestBody
+        from huaweicloudsdkecs.v2 import BatchRebootServersRequest, BatchRebootServersRequestBody, BatchRebootSeversOption, ServerId
 
         client = create_ecs_client(region, access_key, secret_key, proj_id)
 
-        body = BatchRebootServersRequestBody(servers=[{"id": instance_id}], type=reboot_type.upper())
+        server = ServerId(id=instance_id)
+        reboot_opt = BatchRebootSeversOption(servers=[server], type=reboot_type.upper())
+        body = BatchRebootServersRequestBody(reboot=reboot_opt)
         request = BatchRebootServersRequest(body=body)
         response = client.batch_reboot_servers(request)
 

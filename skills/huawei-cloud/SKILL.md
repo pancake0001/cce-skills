@@ -115,7 +115,7 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_stop_ecs_instance` | 关闭（关机）ECS实例（需 confirm=true） |
 | `huawei_start_ecs_instance` | 启动（开机）ECS实例 |
 | `huawei_list_flavors` | 查询区域内可用的ECS实例规格 |
-| `huawei_reboot_ecs` | 重启ECS实例（需 confirm=true） |
+| `huawei_reboot_ecs` | 重启ECS实例（内核漏洞修复的必要步骤，需 confirm=true） |
 
 **参数说明：**
 - `region` (required): 华为云区域 (e.g., cn-north-4, cn-east-3)
@@ -510,20 +510,31 @@ python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 
 ## 主机安全 (HSS) 与节点漏洞管理
 
+### ⚠️ 关键教训：immediate_repair 是异步 API
+
+`huawei_hss_change_vul_status(operate_type=immediate_repair)` 的行为：
+1. API **立即返回 200**（请求被接受）
+2. 漏洞状态从 `unfix` → `fixing`（异步修复中）
+3. **kernel/bpftool 等内核类漏洞**：补丁安装完成后必须**重启节点**才能使修复生效，状态才变为 `fixed`
+
+**reboot_ecs 绝对不能跳过**：对于内核漏洞，重启是修复的必要步骤，不是可选步骤。跳过 reboot → 漏洞卡在 fixing 状态 → 用户以为在修，实际没修好。
+
+**幂等回调**：状态为 fixing 时再次调用返回 HSS.1105（Unknown error），这 ≠ 失败，是正常幂等信号。
+
 ### 工具列表
 
 | 工具 | 功能 |
 |------|------|
 | `huawei_hss_list_hosts` | 查询所有主机的漏洞概览 |
 | `huawei_hss_list_host_vuls_all` | 查询指定主机漏洞（全量自动翻页）|
-| `huawei_hss_change_vul_status` | 修改漏洞状态（忽略/修复/验证）|
+| `huawei_hss_change_vul_status` | 修改漏洞状态（忽略/修复/验证，confirm=true）|
 
-> CCE 节点操作（cordon / drain / uncordon / reboot）属于对应章节，详见 ☸️ CCE 云容器引擎 → 节点管理。
+> CCE 节点操作（cordon / drain / uncordon）属于对应章节，详见 ☸️ CCE 云容器引擎 → 节点管理。
 
 ### 漏洞状态
 
 > 官方 8 种漏洞状态：`unfix` / `ignored` / `verified` / `fixing` / `fixed` / `reboot` / `failed` / `fix_after_reboot`。
-> 节点漏洞修复详细指南见 [CCE_NODE_VUL_FIX.md](./references/CCE_NODE_VUL_FIX.md)。
+> ⚠️ 节点漏洞修复详细指南见 [CCE_NODE_VUL_FIX.md](./references/CCE_NODE_VUL_FIX.md)，包含完整工作流和踩坑记录。
 
 ## Notes
 - Ensure your AK/SK has proper IAM permissions for the requested resources
