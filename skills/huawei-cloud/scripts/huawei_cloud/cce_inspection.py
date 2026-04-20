@@ -30,6 +30,7 @@ from .cce import (
 from .aom import list_aom_current_alarms, get_aom_prom_metrics_http, list_aom_instances
 from .elb import get_elb_metrics
 from .network import get_eip_metrics, list_eip_addresses
+from .hss import list_vul_host_hosts
 from .report_generator import (
     generate_sub_inspection_report,
     generate_summary_report,
@@ -539,6 +540,147 @@ def node_status_inspection(region: str, cluster_id: str, ak: str, sk: str, proje
             
             if abnormal_nodes:
                 result["status"] = "FAIL"
+    except Exception as e:
+        result["error"] = str(e)
+    
+    return result, issues
+
+
+def node_vul_inspection(region: str, cluster_id: str, ak: str, sk: str, project_id: str = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """节点漏洞巡检
+    
+    检查内容：
+    - CCE 集群节点在 HSS 中的漏洞状态
+    - 统计每个节点的 unfix（未处理）漏洞数量
+    - 高危漏洞节点标记为问题
+    
+    Args:
+        region: 华为云区域
+        cluster_id: CCE 集群 ID
+        ak: Access Key ID
+        sk: Secret Access Key
+        project_id: Project ID
+    
+    Returns:
+        (巡检结果, 问题列表)
+    """
+    access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
+    
+    result = {
+        "name": "节点漏洞巡检",
+        "status": "PASS",
+        "checked": False,
+        "total_nodes": 0,
+        "vulnerable_nodes": 0,
+        "clean_nodes": 0,
+        "node_vul_details": [],
+        "high_risk_nodes": [],
+    }
+    
+    issues: List[Dict[str, Any]] = []
+    
+    def add_issue(severity: str, category: str, item: str, details: str):
+        issues.append({
+            "severity": severity,
+            "category": category,
+            "item": item,
+            "details": details
+        })
+    
+    try:
+        # 1. Get all nodes in the CCE cluster
+        nodes_result = list_cce_cluster_nodes(region, cluster_id, access_key, secret_key, proj_id)
+        if not nodes_result.get("success"):
+            result["error"] = nodes_result.get("error", "Failed to get cluster nodes")
+            return result, issues
+        
+        nodes = nodes_result.get("nodes", [])
+        result["total_nodes"] = len(nodes)
+        
+        if not nodes:
+            result["checked"] = True
+            return result, issues
+        
+        
+        # 2. Get all hosts from HSS
+        hss_result = list_vul_host_hosts(region, enterprise_project_id="all_granted_eps",
+                                         limit=100, ak=access_key, sk=secret_key)
+        if not hss_result.get("success"):
+            result["error"] = hss_result.get("error", "Failed to get HSS vulnerability data")
+            return result, issues
+        
+        hss_hosts_by_id = {h["host_id"]: h for h in hss_result.get("hosts", [])}
+        hss_hosts_by_name = {h["host_name"]: h for h in hss_result.get("hosts", [])}
+        result["checked"] = True
+        
+        # 3. Match CCE nodes to HSS hosts (by server_id first, then by node_name fallback)
+        for node in nodes:
+            server_id = node.get("server_id")  # ECS instance ID = HSS host_id
+            node_name = node.get("name", "unknown")  # CCE node name = HSS host_name
+            labels = node.get("labels", {})
+            
+            # OS / Kernel 版本（K8s well-known node labels）
+            os_version = labels.get("node.kubernetes.io/os_version", "")
+            kernel_version = labels.get("node.kubernetes.io/kernel_version", "")
+            
+            # 优先用 server_id 匹配，fallback 到 node_name
+            hss_data = hss_hosts_by_id.get(server_id) if server_id else None
+            if hss_data is None:
+                hss_data = hss_hosts_by_name.get(node_name)
+            
+            in_hss = hss_data is not None
+            
+            vul_info = {
+                "node_name": node_name,
+                "server_id": server_id,
+                "status": node.get("status"),
+                "os_version": os_version,
+                "kernel_version": kernel_version,
+                "in_hss": in_hss,
+                "total_vul_num": 0,
+                "unfix_total": 0,
+                "unfix_high": 0,
+                "unfix_medium": 0,
+                "unfix_low": 0,
+            }
+            
+            if hss_data:
+                vul_info["total_vul_num"] = hss_data.get("total_vul_num", 0)
+                vul_info["unfix_total"] = hss_data.get("unfix_total", 0)
+                vul_info["unfix_high"] = hss_data.get("unfix_high", 0)
+                vul_info["unfix_medium"] = hss_data.get("unfix_medium", 0)
+                vul_info["unfix_low"] = hss_data.get("unfix_low", 0)
+            
+            result["node_vul_details"].append(vul_info)
+            
+            # Count clean vs vulnerable
+            if vul_info["unfix_total"] > 0:
+                result["vulnerable_nodes"] += 1
+            else:
+                result["clean_nodes"] += 1
+            
+            # Flag high-risk nodes (unfix_high > 0 or unfix_total >= 5)
+            if vul_info["unfix_high"] > 0 or vul_info["unfix_total"] >= 5:
+                result["high_risk_nodes"].append({
+                    "node_name": node_name,
+                    "server_id": server_id,
+                    "os_version": os_version,
+                    "kernel_version": kernel_version,
+                    "unfix_total": vul_info["unfix_total"],
+                    "unfix_high": vul_info["unfix_high"],
+                    "unfix_medium": vul_info["unfix_medium"],
+                })
+                sev = "CRITICAL" if vul_info["unfix_high"] > 0 else "WARNING"
+                os_info = f"OS:{os_version} kernel:{kernel_version}" if os_version or kernel_version else ""
+                add_issue(sev, "节点漏洞", node_name,
+                    f"节点 {node_name} {os_info} 存在 {vul_info['unfix_total']} 个未处理漏洞"
+                    f"（高:{vul_info['unfix_high']} / 中:{vul_info['unfix_medium']} / 低:{vul_info['unfix_low']}）")
+        
+        if result["high_risk_nodes"]:
+            result["status"] = "FAIL"
+        elif result["vulnerable_nodes"] > 0:
+            result["status"] = "WARNING"
+    
     except Exception as e:
         result["error"] = str(e)
     
@@ -1595,7 +1737,7 @@ def cce_cluster_inspection(region: str, cluster_id: str, ak: str = None, sk: str
             if ns and ns not in ["kube-system", "monitoring"]:
                 all_namespaces.add(ns)
 
-    # 8 大巡检项
+    # 9 大巡检项
     checks = [
         ("pods", pod_status_inspection(region, cluster_id, access_key, secret_key, proj_id)),
         ("nodes", node_status_inspection(region, cluster_id, access_key, secret_key, proj_id)),
@@ -1609,6 +1751,7 @@ def cce_cluster_inspection(region: str, cluster_id: str, ak: str = None, sk: str
         ("alarms", aom_alarm_inspection(region, cluster_id, cluster_name, access_key, secret_key, proj_id)),
         ("elb_monitoring", elb_monitoring_inspection(
             region, cluster_id, aom_instance_id, cluster_name, access_key, secret_key, proj_id)),
+        ("node_vul", node_vul_inspection(region, cluster_id, access_key, secret_key, proj_id)),
     ]
 
     for task_id, (check_result, issues) in checks:
