@@ -32,6 +32,13 @@ AK/SK仅支持以下两种方式使用：
 | `huawei_delete_cce_cluster` | 删除 | 删除整个CCE集群 |
 | `huawei_scale_cce_workload` | 扩缩容 | 调整Deployment/StatefulSet副本数 |
 | `huawei_delete_cce_workload` | 删除 | 删除工作负载（Deployment/StatefulSet） |
+| `huawei_reboot_ecs` | 重启 | 重启ECS实例（强制重启风险更高） |
+| `huawei_hibernate_cce_cluster` | 休眠 | 休眠集群并停止所有工作负载，暂停控制面计费 |
+| `huawei_awake_cce_cluster` | 唤醒 | 唤醒休眠集群，恢复工作负载和控制面计费 |
+| `huawei_cce_node_cordon` | 标记不可调度 | 节点标记为不可调度，新Pod不会分配 |
+| `huawei_cce_node_uncordon` | 恢复调度 | 节点恢复可调度，新Pod可能立即分配 |
+| `huawei_cce_node_drain` | 驱逐 | 驱逐节点所有Pod，影响业务 |
+| `huawei_hss_change_vul_status` | 漏洞状态修改 | 修复/忽略漏洞为高风险操作，无法回退 |
 
 ### 工作流程
 
@@ -108,6 +115,7 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_stop_ecs_instance` | 关闭（关机）ECS实例（需 confirm=true） |
 | `huawei_start_ecs_instance` | 启动（开机）ECS实例 |
 | `huawei_list_flavors` | 查询区域内可用的ECS实例规格 |
+| `huawei_reboot_ecs` | 重启ECS实例（内核漏洞修复的必要步骤，需 confirm=true） |
 
 **参数说明：**
 - `region` (required): 华为云区域 (e.g., cn-north-4, cn-east-3)
@@ -183,6 +191,7 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_list_cce_configmaps` | 查询集群内ConfigMap列表 |
 | `huawei_list_cce_secrets` | 查询集群内Secret列表 |
 | `huawei_get_cce_kubeconfig` | 获取集群kubeconfig配置 |
+| `huawei_get_cce_addon_detail` | 查询集群插件详情 |
 | `huawei_get_kubernetes_nodes` | 获取Kubernetes节点信息 |
 
 #### 节点管理
@@ -193,10 +202,14 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_get_cce_nodes` | 获取指定节点详细信息 |
 | `huawei_list_cce_nodepools` | 查询集群内所有节点池列表 |
 | `huawei_resize_cce_nodepool` | 调整节点池节点数量（扩缩容） |
+| `huawei_cce_node_cordon` | 标记节点不可调度（cordon） |
+| `huawei_cce_node_uncordon` | 恢复节点可调度（uncordon） |
+| `huawei_cce_node_drain` | 驱逐节点 Pod（需 confirm=true） |
+| `huawei_cce_node_status` | 查询节点调度状态（含OS版本、内核版本） |
 | `huawei_delete_cce_node` | 从集群删除指定节点 |
 | `huawei_delete_cce_cluster` | 删除整个CCE集群 |
-| `huawei_hibernate_cce_cluster` | 休眠CCE集群（停止计费、保留配置） |
-| `huawei_awake_cce_cluster` | 唤醒休眠的CCE集群 |
+| `huawei_hibernate_cce_cluster` | 休眠CCE集群（需 confirm=true） |
+| `huawei_awake_cce_cluster` | 唤醒休眠的CCE集群（需 confirm=true） |
 
 #### 工作负载与资源
 
@@ -271,7 +284,7 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 
 | 工具 | 模式 | 功能 |
 |------|------|------|
-| `huawei_cce_cluster_inspection` | 串行 | 执行CCE集群完整巡检（8项检查） |
+| `huawei_cce_cluster_inspection` | 串行 | 执行CCE集群完整巡检（9项检查） |
 | `huawei_cce_cluster_inspection_parallel` | 并行 ⚡ | 多线程并行巡检，速度提升3-5倍 |
 | `huawei_cce_cluster_inspection_subagent` | Subagent 🚀 | Subagent分布式并行巡检 |
 | `huawei_aggregate_inspection_results` | 结果汇总 | 汇总Subagent巡检结果 |
@@ -285,6 +298,7 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 | `huawei_biz_pod_monitoring_inspection` | 业务Pod监控 |
 | `huawei_node_status_inspection` | Node状态巡检（节点健康度） |
 | `huawei_node_resource_inspection` | 节点资源使用率巡检 |
+| `huawei_node_vul_inspection` | 节点漏洞巡检（含OS版本、内核版本、未处理漏洞数） |
 | `huawei_event_inspection` | 集群关键事件巡检 |
 | `huawei_aom_alarm_inspection` | AOM活跃告警巡检 |
 | `huawei_elb_monitoring_inspection` | ELB负载均衡监控巡检 |
@@ -295,6 +309,7 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 |------|------|----------|
 | `huawei_network_diagnose` | 工作负载网络问题诊断 | 指定工作负载 |
 | `huawei_network_diagnose_by_alarm` | 基于告警的网络问题诊断 | 触发告警的工作负载 |
+| `huawei_network_verify_pod_scheduling` | 验证Pod调度可达性 | 验证指定工作负载Pod是否可正常调度 |
 
 **诊断流程（近1小时数据）：**
 
@@ -493,6 +508,34 @@ python3 huawei-cloud.py huawei_list_log_groups region=cn-north-4
 python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 ```
 
+## 主机安全 (HSS) 与节点漏洞管理
+
+### ⚠️ 关键教训：immediate_repair 是异步 API
+
+`huawei_hss_change_vul_status(operate_type=immediate_repair)` 的行为：
+1. API **立即返回 200**（请求被接受）
+2. 漏洞状态从 `unfix` → `fixing`（异步修复中）
+3. **kernel/bpftool 等内核类漏洞**：补丁安装完成后必须**重启节点**才能使修复生效，状态才变为 `fixed`
+
+**reboot_ecs 绝对不能跳过**：对于内核漏洞，重启是修复的必要步骤，不是可选步骤。跳过 reboot → 漏洞卡在 fixing 状态 → 用户以为在修，实际没修好。
+
+**幂等回调**：状态为 fixing 时再次调用返回 HSS.1105（Unknown error），这 ≠ 失败，是正常幂等信号。
+
+### 工具列表
+
+| 工具 | 功能 |
+|------|------|
+| `huawei_hss_list_hosts` | 查询所有主机的漏洞概览 |
+| `huawei_hss_list_host_vuls_all` | 查询指定主机漏洞（全量自动翻页）|
+| `huawei_hss_change_vul_status` | 修改漏洞状态（忽略/修复/验证，confirm=true）|
+
+> CCE 节点操作（cordon / drain / uncordon）属于对应章节，详见 ☸️ CCE 云容器引擎 → 节点管理。
+
+### 漏洞状态
+
+> 官方 8 种漏洞状态：`unfix` / `ignored` / `verified` / `fixing` / `fixed` / `reboot` / `failed` / `fix_after_reboot`。
+> ⚠️ 节点漏洞修复详细指南见 [CCE_NODE_VUL_FIX.md](./references/CCE_NODE_VUL_FIX.md)，包含完整工作流和踩坑记录。
+
 ## Notes
 - Ensure your AK/SK has proper IAM permissions for the requested resources
 - Different regions may have different resource availability
@@ -501,6 +544,7 @@ python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 - CCE cluster operations require appropriate Kubernetes RBAC permissions
 
 ## References
-## References
+
+- [CCE节点漏洞修复指南](./references/CCE_NODE_VUL_FIX.md)
 - [CCE安全组配置说明](./references/CCE_Security_Group_Configuration.md)
 - [CCE节点故障检测策略配置指南](./references/CCE_Node_Fault_Detection_Configuration.md)

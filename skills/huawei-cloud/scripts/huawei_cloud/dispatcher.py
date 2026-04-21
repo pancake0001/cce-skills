@@ -6,9 +6,20 @@ from typing import Any, Callable, Dict
 
 import json
 
-from . import aom, cce_app_logs, cce, cce_metrics, ecs, elb, identity, lts, network, storage
+from . import aom, cce, cce_metrics, ecs, elb, hss, identity, network, storage
 from . import cce_inspection
 from . import cce_diagnosis
+from . import common
+
+# cce_app_logs and lts require huaweicloudsdklts which may not be installed
+try:
+    from . import cce_app_logs as _cce_app_logs_mod
+    from . import lts as _lts_mod
+    _lts_available = True
+except ImportError:
+    _lts_available = False
+    _cce_app_logs_mod = None
+    _lts_mod = None
 
 
 Handler = Callable[[Dict[str, str]], Dict[str, Any]]
@@ -261,25 +272,25 @@ def _list_aom_current_alarms(params: Dict[str, str]) -> Dict[str, Any]:
 
 
 def _list_log_groups(params: Dict[str, str]) -> Dict[str, Any]:
-    return lts.list_log_groups(params["region"], params.get("ak"), params.get("sk"), params.get("project_id"))
+    return _lts_mod.list_log_groups(params["region"], params.get("ak"), params.get("sk"), params.get("project_id"))
 
 
 def _list_log_streams(params: Dict[str, str]) -> Dict[str, Any]:
-    return lts.list_log_streams(params["region"], params.get("log_group_id"), params.get("ak"), params.get("sk"), params.get("project_id"))
+    return _lts_mod.list_log_streams(params["region"], params.get("log_group_id"), params.get("ak"), params.get("sk"), params.get("project_id"))
 
 
 def _query_logs(params: Dict[str, str]) -> Dict[str, Any]:
     labels = _parse_json_param(params.get("labels"))
-    return lts.query_logs(params["region"], params["log_group_id"], params["log_stream_id"], params.get("start_time"), params.get("end_time"), params.get("keywords"), _to_int(params.get("limit"), 1000), params.get("scroll_id"), params.get("is_desc", "true").lower() == "true", params.get("is_iterative", "false").lower() == "true", labels, params.get("ak"), params.get("sk"), params.get("project_id"))
+    return _lts_mod.query_logs(params["region"], params["log_group_id"], params["log_stream_id"], params.get("start_time"), params.get("end_time"), params.get("keywords"), _to_int(params.get("limit"), 1000), params.get("scroll_id"), params.get("is_desc", "true").lower() == "true", params.get("is_iterative", "false").lower() == "true", labels, params.get("ak"), params.get("sk"), params.get("project_id"))
 
 
 def _get_recent_logs(params: Dict[str, str]) -> Dict[str, Any]:
     labels = _parse_json_param(params.get("labels"))
-    return lts.get_recent_logs(params["region"], params["log_group_id"], params["log_stream_id"], _to_int(params.get("hours"), 1), _to_int(params.get("limit"), 1000), params.get("keywords"), labels, params.get("ak"), params.get("sk"), params.get("project_id"))
+    return _lts_mod.get_recent_logs(params["region"], params["log_group_id"], params["log_stream_id"], _to_int(params.get("hours"), 1), _to_int(params.get("limit"), 1000), params.get("keywords"), labels, params.get("ak"), params.get("sk"), params.get("project_id"))
 
 
 def _query_aom_logs(params: Dict[str, str]) -> Dict[str, Any]:
-    return lts.query_aom_logs(params["region"], params["cluster_id"], params.get("namespace"), params.get("pod_name"), params.get("container_name"), params.get("start_time"), params.get("end_time"), params.get("keywords"), _to_int(params.get("limit"), 100), params.get("ak"), params.get("sk"), params.get("project_id"))
+    return _lts_mod.query_aom_logs(params["region"], params["cluster_id"], params.get("namespace"), params.get("pod_name"), params.get("container_name"), params.get("start_time"), params.get("end_time"), params.get("keywords"), _to_int(params.get("limit"), 100), params.get("ak"), params.get("sk"), params.get("project_id"))
 
 
 def _inspection_action(handler: Callable[[Dict[str, str]], Dict[str, Any]], params: Dict[str, str]) -> Dict[str, Any]:
@@ -467,15 +478,17 @@ def _workload_diagnose_by_alarm_action(params):
 
 def _hibernate_cce_cluster_action(params):
     return cce.hibernate_cce_cluster(
-        params["region"], params["cluster_id"],
-        params.get("ak"), params.get("sk"), params.get("project_id")
+        region=params["region"], cluster_id=params["cluster_id"],
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"),
+        confirm=params.get("confirm", "").lower() == "true"
     )
 
 
 def _awake_cce_cluster_action(params):
     return cce.awake_cce_cluster(
-        params["region"], params["cluster_id"],
-        params.get("ak"), params.get("sk"), params.get("project_id")
+        region=params["region"], cluster_id=params["cluster_id"],
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"),
+        confirm=params.get("confirm", "").lower() == "true"
     )
 
 
@@ -501,6 +514,71 @@ def _list_cce_cronjobs(params: Dict[str, str]) -> Dict[str, Any]:
         params.get("namespace"),
         params.get("ak"), params.get("sk"), params.get("project_id")
     )
+
+
+# ---- HSS handlers ----
+def _hss_list_vul_host_hosts(params: Dict[str, str]) -> Dict[str, Any]:
+    return hss.list_vul_host_hosts(region=params["region"], ak=params.get("ak"), sk=params.get("sk"))
+
+def _hss_list_host_vuls_all(params: Dict[str, str]) -> Dict[str, Any]:
+    return hss.list_host_vuls_all(
+        region=params["region"],
+        ak=params.get("ak"),
+        sk=params.get("sk"),
+        host_id=params.get("host_id"),
+        host_name=params.get("host_name"),
+        status=params.get("status"),
+        repair_priority=params.get("repair_priority"),
+        severity_level=params.get("severity_level"),
+        limit=int(params.get("limit", 100)),
+        enterprise_project_id=params.get("enterprise_project_id", "all_granted_eps"),
+    )
+
+def _hss_change_vul_status(params: Dict[str, str]) -> Dict[str, Any]:
+    return hss.change_vul_status(
+        region=params["region"],
+        ak=params.get("ak"),
+        sk=params.get("sk"),
+        operate_type=params["operate_type"],
+        vul_ids=params.get("vul_ids"),
+        host_ids=params.get("host_ids"),
+        vul_type=params.get("vul_type", "linux_vul"),
+        remark=params.get("remark"),
+        select_type=params.get("select_type"),
+        confirm=params.get("confirm", "").lower() == "true",
+        enterprise_project_id=params.get("enterprise_project_id", "all_granted_eps"),
+    )
+
+
+def _cce_node_cordon(params: Dict[str, str]) -> Dict[str, Any]:
+    return cce.cce_node_cordon(
+        region=params["region"], cluster_id=params["cluster_id"], node_name=params["node_name"],
+        confirm=params.get("confirm", "").lower() == "true",
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"))
+
+def _cce_node_uncordon(params: Dict[str, str]) -> Dict[str, Any]:
+    return cce.cce_node_uncordon(
+        region=params["region"], cluster_id=params["cluster_id"], node_name=params["node_name"],
+        confirm=params.get("confirm", "").lower() == "true",
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"))
+
+def _cce_node_drain(params: Dict[str, str]) -> Dict[str, Any]:
+    return cce.cce_node_drain(
+        region=params["region"], cluster_id=params["cluster_id"], node_name=params["node_name"],
+        confirm=params.get("confirm", "").lower() == "true",
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"))
+
+def _cce_node_status(params: Dict[str, str]) -> Dict[str, Any]:
+    return cce.cce_node_status(
+        region=params["region"], cluster_id=params["cluster_id"], node_name=params["node_name"],
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"))
+
+def _reboot_ecs(params: Dict[str, str]) -> Dict[str, Any]:
+    return ecs.reboot_ecs_instance(
+        region=params["region"], instance_id=params["instance_id"],
+        reboot_type=params.get("reboot_type", "SOFT"),
+        confirm=params.get("confirm", "").lower() == "true",
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"))
 
 
 ACTION_SPECS: Dict[str, tuple[tuple[str, ...], Handler]] = {
@@ -576,13 +654,14 @@ ACTION_SPECS: Dict[str, tuple[tuple[str, ...], Handler]] = {
     "huawei_biz_pod_monitoring_inspection": (("region", "cluster_id"), _biz_pod_inspection_action),
     "huawei_node_status_inspection": (("region", "cluster_id"), lambda params: _inspection_check_action(cce_inspection.node_status_inspection, params)),
     "huawei_node_resource_inspection": (("region", "cluster_id"), _node_resource_inspection_action),
+    "huawei_node_vul_inspection": (("region", "cluster_id"), lambda params: _inspection_check_action(cce_inspection.node_vul_inspection, params)),
     "huawei_event_inspection": (("region", "cluster_id"), lambda params: _inspection_check_action(cce_inspection.event_inspection, params)),
     "huawei_aom_alarm_inspection": (("region", "cluster_id"), _aom_alarm_inspection_action),
     "huawei_elb_monitoring_inspection": (("region", "cluster_id"), _elb_monitoring_inspection_action),
-    "huawei_get_cce_logconfigs": (("region", "cluster_id"), lambda params: cce_app_logs.get_cce_logconfigs_action(params)),
-    "huawei_get_application_log_stream": (("region", "cluster_id", "app_name"), lambda params: cce_app_logs.get_application_log_stream_action(params)),
-    "huawei_query_application_logs": (("region", "cluster_id", "app_name"), lambda params: cce_app_logs.query_application_logs_action(params)),
-    "huawei_query_application_recent_logs": (("region", "cluster_id", "app_name"), lambda params: cce_app_logs.query_application_recent_logs_action(params)),
+    "huawei_get_cce_logconfigs": (("region", "cluster_id"), lambda params: _cce_app_logs_mod.get_cce_logconfigs_action(params)),
+    "huawei_get_application_log_stream": (("region", "cluster_id", "app_name"), lambda params: _cce_app_logs_mod.get_application_log_stream_action(params)),
+    "huawei_query_application_logs": (("region", "cluster_id", "app_name"), lambda params: _cce_app_logs_mod.query_application_logs_action(params)),
+    "huawei_query_application_recent_logs": (("region", "cluster_id", "app_name"), lambda params: _cce_app_logs_mod.query_application_recent_logs_action(params)),
     "huawei_get_cce_pod_metrics_topN": (("region", "cluster_id"), lambda params: _metric_action(cce_metrics.get_cce_pod_metrics_topN, params["region"], params["cluster_id"], params.get("ak"), params.get("sk"), params.get("project_id"), params.get("namespace"), params.get("label_selector"), _to_int(params.get("top_n"), 10), _to_int(params.get("hours"), 1), params.get("cpu_query"), params.get("memory_query"), params.get("node_ip"))),
     "huawei_get_cce_pod_metrics": (("region", "cluster_id", "pod_name"), lambda params: _metric_action(cce_metrics.get_cce_pod_metrics, params["region"], params["cluster_id"], params["pod_name"], params.get("ak"), params.get("sk"), params.get("project_id"), params.get("namespace"), _to_int(params.get("hours"), 1), params.get("cpu_query"), params.get("memory_query"))),
     "huawei_get_cce_node_metrics_topN": (("region", "cluster_id"), lambda params: _metric_action(cce_metrics.get_cce_node_metrics_topN, params["region"], params["cluster_id"], params.get("ak"), params.get("sk"), params.get("project_id"), _to_int(params.get("top_n"), 10), _to_int(params.get("hours"), 1), params.get("cpu_query"), params.get("memory_query"), params.get("disk_query"))),
@@ -597,6 +676,20 @@ ACTION_SPECS: Dict[str, tuple[tuple[str, ...], Handler]] = {
     "huawei_network_verify_pod_scheduling": (("region", "cluster_id", "workload_name"), _network_verify_pod_scheduling_action),
     "huawei_node_batch_diagnose": (("region", "cluster_id"), _node_batch_diagnose_action),
     "huawei_node_diagnose": (("region", "cluster_id"), _node_diagnose_action),
+
+    # HSS vulnerability management
+    "huawei_hss_list_hosts": (("region",), _hss_list_vul_host_hosts),
+    "huawei_hss_list_host_vuls_all": (("region", "host_id"), _hss_list_host_vuls_all),
+    "huawei_hss_change_vul_status": (("region",), _hss_change_vul_status),
+
+    # CCE node operations
+    "huawei_cce_node_cordon": (("region", "cluster_id", "node_name"), _cce_node_cordon),
+    "huawei_cce_node_uncordon": (("region", "cluster_id", "node_name"), _cce_node_uncordon),
+    "huawei_cce_node_drain": (("region", "cluster_id", "node_name"), _cce_node_drain),
+    "huawei_cce_node_status": (("region", "cluster_id", "node_name"), _cce_node_status),
+
+    # ECS operations
+    "huawei_reboot_ecs": (("region", "instance_id"), _reboot_ecs),
 }
 
 

@@ -286,11 +286,12 @@ def list_cce_cluster_nodes(region: str, cluster_id: str, ak: Optional[str] = Non
                     "name": node.metadata.name,
                     "status": node.status.phase if hasattr(node, 'status') and hasattr(node.status, 'phase') else 'Unknown',
                     "created_at": str(node.metadata.creation_timestamp) if hasattr(node, 'metadata') and hasattr(node.metadata, 'creation_timestamp') else None,
+                    "labels": dict(node.metadata.labels) if hasattr(node.metadata, 'labels') and node.metadata.labels else {},
                 }
                 # Node spec
                 if hasattr(node, 'spec'):
                     node_info["flavor"] = getattr(node.spec, 'flavor', None)
-                    node_info["server_id"] = getattr(node.spec, 'server_id', None)  # ECS服务器ID
+                    node_info["server_id"] = getattr(node.status, 'server_id', None)  # ECS服务器ID = HSS host_id
                     node_info["availability_zone"] = getattr(node.spec, 'az', None)  # 可用区
                 # Node conditions
                 if hasattr(node, 'status') and hasattr(node.status, 'conditions'):
@@ -384,7 +385,7 @@ def get_cce_nodes(region: str, cluster_id: str, node_name: Optional[str] = None,
                 # Node spec
                 if hasattr(node, 'spec'):
                     node_info["flavor"] = getattr(node.spec, 'flavor', None)
-                    node_info["server_id"] = getattr(node.spec, 'server_id', None)  # ECS服务器ID
+                    node_info["server_id"] = getattr(node.status, 'server_id', None)  # ECS服务器ID = HSS host_id
                     node_info["availability_zone"] = getattr(node.spec, 'az', None)  # 可用区
                 # Node conditions
                 if hasattr(node, 'status') and hasattr(node.status, 'conditions'):
@@ -3351,11 +3352,12 @@ def hibernate_cce_cluster(
     ak: Optional[str] = None,
     sk: Optional[str] = None,
     project_id: Optional[str] = None,
+    confirm: bool = False,
 ) -> Dict[str, Any]:
     """Hibernate a CCE cluster (pause billing + workloads)
 
     Puts the cluster into hibernated state. Billing for control plane is paused.
-    workloads are stopped. Use awake_cce_cluster to resume.
+    Workloads are stopped. Use awake_cce_cluster to resume.
 
     Args:
         region: Huawei Cloud region (e.g., cn-north-4)
@@ -3363,6 +3365,7 @@ def hibernate_cce_cluster(
         ak: Access Key ID (optional)
         sk: Secret Access Key (optional)
         project_id: Project ID (optional)
+        confirm: Must be True to confirm the operation
 
     Returns:
         Dictionary with result
@@ -3380,6 +3383,16 @@ def hibernate_cce_cluster(
 
     if not SDK_AVAILABLE:
         return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+
+    if not confirm:
+        return {
+            "success": False,
+            "requires_confirmation": True,
+            "operation": "hibernate_cce_cluster",
+            "cluster_id": cluster_id,
+            "error": f"Hibernate will pause cluster {cluster_id} and stop all workloads. Billing for control plane is paused.",
+            "hint": f"Add confirm=true to confirm. Example: huawei_hibernate_cce_cluster region=cn-north-4 cluster_id=xxx confirm=true"
+        }
 
     try:
         from huaweicloudsdkcce.v3 import HibernateClusterRequest
@@ -3418,6 +3431,7 @@ def awake_cce_cluster(
     ak: Optional[str] = None,
     sk: Optional[str] = None,
     project_id: Optional[str] = None,
+    confirm: bool = False,
 ) -> Dict[str, Any]:
     """Awake a hibernated CCE cluster (resume billing + workloads)
 
@@ -3430,6 +3444,7 @@ def awake_cce_cluster(
         ak: Access Key ID (optional)
         sk: Secret Access Key (optional)
         project_id: Project ID (optional)
+        confirm: Must be True to confirm the operation
 
     Returns:
         Dictionary with result
@@ -3447,6 +3462,16 @@ def awake_cce_cluster(
 
     if not SDK_AVAILABLE:
         return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+
+    if not confirm:
+        return {
+            "success": False,
+            "requires_confirmation": True,
+            "operation": "awake_cce_cluster",
+            "cluster_id": cluster_id,
+            "error": f"Awake will resume cluster {cluster_id}. Control plane billing resumes and workloads restart.",
+            "hint": f"Add confirm=true to confirm. Example: huawei_awake_cce_cluster region=cn-north-4 cluster_id=xxx confirm=true"
+        }
 
     try:
         from huaweicloudsdkcce.v3 import AwakeClusterRequest
@@ -3806,3 +3831,287 @@ def get_pod_logs(
         # Cleanup temporary certificate files
         for f in temp_files:
             _safe_delete_file(f)
+
+
+# ---- CCE Node Operations ----
+
+def _node_operation(region: str, cluster_id: str, node_name: str, operation: str,
+                   confirm: bool = False, ak: Optional[str] = None, sk: Optional[str] = None,
+                   project_id: str = None) -> Dict[str, Any]:
+    """Internal helper for CCE node operations (cordon/uncordon/drain/status)
+
+    Args:
+        region: Huawei Cloud region
+        cluster_id: CCE cluster ID
+        node_name: Node name or IP address
+        operation: One of 'cordon', 'uncordon', 'drain', 'status'
+        confirm: Required for write operations (cordon/uncordon/drain)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+
+    Returns:
+        Dictionary with operation result
+    """
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {"success": False, "error": "Credentials not provided."}
+
+    if not K8S_AVAILABLE:
+        return {"success": False, "error": f"Kubernetes SDK not installed: {K8S_IMPORT_ERROR}"}
+
+    # Temp file paths (must be defined before try block for finally cleanup)
+    ca_cert_file = client_cert_file = client_key_file = None
+
+    try:
+        # Get cluster kubeconfig
+        cce_client = create_cce_client(region, access_key, secret_key, proj_id)
+        from huaweicloudsdkcce.v3 import CreateKubernetesClusterCertRequest, ClusterCertDuration
+        cert_req = CreateKubernetesClusterCertRequest(cluster_id=cluster_id)
+        cert_req.body = ClusterCertDuration(duration=1)
+        kubeconfig_data = cce_client.create_kubernetes_cluster_cert(cert_req).to_dict()
+
+        kubeconfig_str = kubeconfig_data.get("kubeconfig") or kubeconfig_data.get("content", "")
+        import tempfile, os, kubernetes
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.kubeconfig', delete=False) as f:
+            f.write(kubeconfig_str)
+            cert_file = f.name
+
+        try:
+            import kubernetes as k8s
+            from kubernetes.client import Configuration, CoreV1Api
+            import yaml, base64
+
+            # kubeconfig_data structure: SDK returns flat dict (not nested under 'kubeconfig' key)
+            raw_kc = kubeconfig_data.get("kubeconfig") or kubeconfig_data.get("content", "") or kubeconfig_data
+            kc = yaml.safe_load(raw_kc) if isinstance(raw_kc, str) and raw_kc else raw_kc
+            # Get current context and resolve to cluster/user
+            current_ctx = kc.get('current_context', '')
+            ctx_entry = next((c for c in kc.get('contexts', []) if c['name'] == current_ctx), None)
+            if not ctx_entry:
+                return {"success": False, "error": f"Context '{current_ctx}' not found in kubeconfig"}
+            cluster_name = ctx_entry['context']['cluster']
+            user_name = ctx_entry['context']['user']
+
+            # Get cluster config
+            cluster_entry = next((c for c in kc.get('clusters', []) if c['name'] == cluster_name), None)
+            if not cluster_entry:
+                return {"success": False, "error": f"Cluster '{cluster_name}' not found in kubeconfig"}
+            cluster_cfg = cluster_entry['cluster']
+
+            # Get user config
+            user_entry = next((u for u in kc.get('users', []) if u['name'] == user_name), None)
+            if not user_entry:
+                return {"success": False, "error": f"User '{user_name}' not found in kubeconfig"}
+            user_cfg = user_entry['user']
+
+            # Extract server (prefer current context; fallback to clusters[0] for compatibility)
+            server = cluster_cfg.get('server', '')
+
+            # Write certs to temp files
+            ca_cert_file = None
+            client_cert_file = None
+            client_key_file = None
+
+            ca_data = cluster_cfg.get('certificate_authority_data')
+            if ca_data:
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.crt', delete=False) as f:
+                    f.write(base64.b64decode(ca_data).decode())
+                    ca_cert_file = f.name
+
+            cert_data = user_cfg.get('client_certificate_data')
+            key_data = user_cfg.get('client_key_data')
+            if cert_data and key_data:
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.crt', delete=False) as f:
+                    f.write(base64.b64decode(cert_data).decode())
+                    client_cert_file = f.name
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.key', delete=False) as f:
+                    f.write(base64.b64decode(key_data).decode())
+                    client_key_file = f.name
+
+            # Determine if skip TLS verify (only for 'external' context which has insecure_skip_tls_verify=true)
+            skip_tls = cluster_cfg.get('insecure_skip_tls_verify', False)
+
+            # Create configuration with explicit certs
+            config = Configuration()
+            config.host = server
+            config.verify_ssl = not skip_tls
+            if ca_cert_file:
+                config.ssl_ca_cert = ca_cert_file
+            if client_cert_file:
+                config.cert_file = client_cert_file
+            if client_key_file:
+                config.key_file = client_key_file
+
+            api_client = k8s.client.ApiClient(config)
+            core_v1 = CoreV1Api(api_client)
+
+            if operation == 'status':
+                node = core_v1.read_node(node_name)
+                conditions = {c.type: c.status for c in node.status.conditions}
+                node_labels = dict(node.metadata.labels) if node.metadata.labels else {}
+                return {
+                    "success": True, "operation": "status", "node": node_name,
+                    "schedulable": node.spec.unschedulable is None,
+                    "ready": conditions.get("Ready") == "True", "conditions": conditions,
+                    "os_version": node_labels.get("node.kubernetes.io/os_version", ""),
+                    "kernel_version": node_labels.get("node.kubernetes.io/kernel_version", ""),
+                }
+            elif operation == 'cordon':
+                if not confirm:
+                    return {
+                        "success": False, "requires_confirmation": True,
+                        "operation": "cordon", "node": node_name,
+                        "error": f"Cordon will mark node {node_name} as unschedulable.",
+                        "hint": f"Add confirm=true to confirm. Example: cce_node_cordon region=cn-north-4 cluster_id=xxx node_name=192.168.x.x confirm=true"
+                    }
+                core_v1.patch_node(node_name, {'spec': {'unschedulable': True}})
+                return {"success": True, "operation": "cordon", "node": node_name, "message": "Node marked as unschedulable"}
+            elif operation == 'uncordon':
+                if not confirm:
+                    return {
+                        "success": False, "requires_confirmation": True,
+                        "operation": "uncordon", "node": node_name,
+                        "error": f"Uncordon will mark node {node_name} as schedulable. New pods may be immediately assigned.",
+                        "hint": f"Add confirm=true to confirm. Example: cce_node_uncordon region=cn-north-4 cluster_id=xxx node_name=192.168.x.x confirm=true"
+                    }
+                core_v1.patch_node(node_name, {'spec': {'unschedulable': None}})
+                return {"success": True, "operation": "uncordon", "node": node_name, "message": "Node marked as schedulable"}
+            elif operation == 'drain':
+                if not confirm:
+                    pods_preview = core_v1.list_pod_for_all_namespaces(field_selector=f'spec.nodeName={node_name}').items
+                    affected = [f"{p.metadata.namespace}/{p.metadata.name}"
+                                for p in pods_preview
+                                if p.metadata.namespace not in ('kube-system', 'hss', 'monitoring')]
+                    return {
+                        "success": False, "requires_confirmation": True,
+                        "operation": "drain", "node": node_name,
+                        "affected_pods": affected,
+                        "error": f"Drain will delete {len(affected)} non-system pods on node {node_name}.",
+                        "hint": f"Add confirm=true to confirm. Example: cce_node_drain region=cn-north-4 cluster_id=xxx node_name=192.168.x.x confirm=true"
+                    }
+                skip_ns = set(['kube-system', 'hss', 'monitoring'])
+                grace = 30
+                pods = core_v1.list_pod_for_all_namespaces(field_selector=f'spec.nodeName={node_name}').items
+                deleted, skipped = [], []
+                for p in pods:
+                    ns, pname = p.metadata.namespace, p.metadata.name
+                    if ns in skip_ns:
+                        skipped.append(f"{ns}/{pname}"); continue
+                    try:
+                        body = k8s.client.V1DeleteOptions(grace_period_seconds=grace)
+                        core_v1.delete_namespaced_pod(pname, ns, body=body)
+                        deleted.append(f"{ns}/{pname}")
+                    except Exception as e:
+                        skipped.append(f"{ns}/{pname} ({e})"[:100])
+                return {"success": True, "operation": "drain", "node": node_name, "deleted": deleted, "skipped": skipped}
+            else:
+                return {"success": False, "error": f"Unknown operation: {operation}"}
+        finally:
+            # Clean up all temp files
+            for f in [ca_cert_file, client_cert_file, client_key_file]:
+                if f and os.path.exists(f):
+                    try:
+                        os.unlink(f)
+                    except Exception:
+                        pass
+    except ClientRequestException as e:
+        return {"success": False, "error": f"{e.error_code} - {e.error_msg}", "request_id": getattr(e, "request_id", None)}
+    except Exception as e:
+        return {"success": False, "error": str(e), "error_type": type(e).__name__}
+
+
+def _extract_host(kubeconfig_str: str) -> str:
+    """Extract hostname from kubeconfig YAML"""
+    try:
+        import yaml, re
+        config = yaml.safe_load(kubeconfig_str)
+        clusters = config.get('clusters', [])
+        if clusters:
+            server = clusters[0].get('cluster', {}).get('server', '')
+            match = re.match(r'https?://([^:/]+)', server)
+            if match:
+                return f"https://{match.group(1)}:6443"
+    except Exception:
+        pass
+    return "https://127.0.0.1:6443"
+
+
+def cce_node_cordon(region: str, cluster_id: str, node_name: str, confirm: bool = False,
+                    ak: Optional[str] = None, sk: Optional[str] = None,
+                    project_id: str = None) -> Dict[str, Any]:
+    """Mark CCE node as unschedulable (cordon)
+
+    Args:
+        region: Huawei Cloud region
+        cluster_id: CCE cluster ID
+        node_name: Node name or IP address
+        confirm: Must be True to confirm the operation
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+
+    Returns:
+        Dictionary with operation result
+    """
+    return _node_operation(region, cluster_id, node_name, 'cordon', confirm=confirm, ak=ak, sk=sk, project_id=project_id)
+
+
+def cce_node_uncordon(region: str, cluster_id: str, node_name: str, confirm: bool = False,
+                      ak: Optional[str] = None, sk: Optional[str] = None,
+                      project_id: str = None) -> Dict[str, Any]:
+    """Mark CCE node as schedulable (uncordon)
+
+    Args:
+        region: Huawei Cloud region
+        cluster_id: CCE cluster ID
+        node_name: Node name or IP address
+        confirm: Must be True to confirm the operation
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+
+    Returns:
+        Dictionary with operation result
+    """
+    return _node_operation(region, cluster_id, node_name, 'uncordon', confirm=confirm, ak=ak, sk=sk, project_id=project_id)
+
+
+def cce_node_drain(region: str, cluster_id: str, node_name: str, confirm: bool = False,
+                   ak: Optional[str] = None, sk: Optional[str] = None,
+                   project_id: str = None) -> Dict[str, Any]:
+    """Drain CCE node (evict all non-system pods)
+
+    Args:
+        region: Huawei Cloud region
+        cluster_id: CCE cluster ID
+        node_name: Node name or IP address
+        confirm: Must be True to confirm the operation
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+
+    Returns:
+        Dictionary with operation result
+    """
+    return _node_operation(region, cluster_id, node_name, 'drain', confirm=confirm, ak=ak, sk=sk, project_id=project_id)
+
+
+def cce_node_status(region: str, cluster_id: str, node_name: str,
+                    ak: Optional[str] = None, sk: Optional[str] = None,
+                    project_id: str = None) -> Dict[str, Any]:
+    """Query CCE node schedulability status
+
+    Args:
+        region: Huawei Cloud region
+        cluster_id: CCE cluster ID
+        node_name: Node name or IP address
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+
+    Returns:
+        Dictionary with node status (schedulable, ready, conditions)
+    """
+    return _node_operation(region, cluster_id, node_name, 'status', confirm=True, ak=ak, sk=sk, project_id=project_id)

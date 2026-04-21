@@ -417,3 +417,85 @@ def start_ecs_instance(
             "error": str(e),
             "error_type": type(e).__name__,
         }
+
+
+def reboot_ecs_instance(
+    region: str,
+    instance_id: str,
+    reboot_type: str = "SOFT",
+    ak: Optional[str] = None,
+    sk: Optional[str] = None,
+    project_id: str = None,
+    confirm: bool = False,
+) -> Dict[str, Any]:
+    """Reboot an ECS instance (SOFT or HARD)
+
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        instance_id: ECS instance ID to reboot
+        reboot_type: Reboot type - SOFT (normal) or HARD (force), default: SOFT
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+        confirm: Must be set to True to confirm the reboot
+
+    Returns:
+        Dictionary with operation result
+    """
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {
+            "success": False,
+            "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+        }
+
+    if not instance_id:
+        return {"success": False, "error": "instance_id is required"}
+
+    if not SDK_AVAILABLE:
+        return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+
+    if not confirm:
+        return {
+            "success": False,
+            "requires_confirmation": True,
+            "instance_id": instance_id,
+            "reboot_type": reboot_type.upper(),
+            "error": f"ECS reboot will forcibly restart instance {instance_id}. Unsaved data may be lost.",
+            "hint": f"Add confirm=true to confirm. Example: reboot_ecs_instance region=cn-north-4 instance_id=xxx confirm=true reboot_type=SOFT"
+        }
+
+    try:
+        from huaweicloudsdkecs.v2 import BatchRebootServersRequest, BatchRebootServersRequestBody, BatchRebootSeversOption, ServerId
+
+        client = create_ecs_client(region, access_key, secret_key, proj_id)
+
+        server = ServerId(id=instance_id)
+        reboot_opt = BatchRebootSeversOption(servers=[server], type=reboot_type.upper())
+        body = BatchRebootServersRequestBody(reboot=reboot_opt)
+        request = BatchRebootServersRequest(body=body)
+        response = client.batch_reboot_servers(request)
+
+        return {
+            "success": True,
+            "region": region,
+            "instance_id": instance_id,
+            "reboot_type": reboot_type.upper(),
+            "action": "reboot_ecs_instance",
+            "message": "ECS instance reboot request submitted successfully",
+            "status_code": response.status_code if hasattr(response, "status_code") else None,
+        }
+
+    except ClientRequestException as e:
+        return {
+            "success": False,
+            "error": f"{e.error_code} - {e.error_msg}",
+            "request_id": getattr(e, "request_id", None),
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
