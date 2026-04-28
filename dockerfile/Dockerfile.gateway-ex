@@ -1,0 +1,19 @@
+# Extend the base OpenClaw gateway image to pre-install huawei-cloud skill
+FROM swr.cn-north-4.myhuaweicloud.com/pancake/openclaw:2026.3.23-2
+
+# Copy huawei-cloud skill into alice and bob workspaces
+COPY skills/huawei-cloud /home/openclaw/.openclaw/workspace-alice/skills/huawei-cloud
+COPY skills/huawei-cloud /home/openclaw/.openclaw/workspace-bob/skills/huawei-cloud
+
+# Also copy to sandbox skills directory for direct SSH access
+COPY skills/huawei-cloud /home/sandbox/skills/huawei-cloud
+
+# Set proper ownership (run as node user which is typically uid 1000)
+USER root
+RUN chown -R 1000:1000 /home/openclaw/.openclaw/workspace-alice/skills \
+    /home/openclaw/.openclaw/workspace-bob/skills \
+    /home/sandbox/skills && \
+    chmod -R 755 /home/openclaw/.openclaw/workspace-alice/skills \
+    /home/openclaw/.openclaw/workspace-bob/skills \
+    /home/sandbox/skills
+USER 1000

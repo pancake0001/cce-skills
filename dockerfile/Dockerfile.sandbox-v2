@@ -1,0 +1,61 @@
+# Extend openclaw-sandbox:bookworm-slim with OpenSSH server instead of dropbear
+# Based on Dockerfile.sandbox-ssh but replaces dropbear with openssh-server
+
+FROM openclaw-sandbox:bookworm-slim
+
+USER root
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Use Aliyun mirror for faster apt in China
+RUN sed -i 's|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources && \
+    sed -i 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g' /etc/apt/sources.list.d/debian.sources
+
+# Replace dropbear with OpenSSH server
+RUN apt-get update && \
+    apt-get upgrade -y --no-install-recommends && \
+    apt-get install -y --no-install-recommends \
+    openssh-server \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configure sshd - disable password auth, use authorized_keys only
+RUN mkdir -p /run/sshd
+
+RUN sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config && \
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config && \
+    sed -i 's/#PubkeyAuthentication no/PubkeyAuthentication yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#UsePAM yes/UsePAM yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PermitUserEnvironment no/PermitUserEnvironment yes/' /etc/ssh/sshd_config && \
+    echo "AuthorizedKeysFile /var/run/sandbox/.ssh/authorized_keys" >> /etc/ssh/sshd_config && \
+    chmod 666 /etc/environment
+
+# Generate SSH host keys
+RUN ssh-keygen -t rsa -f /etc/ssh/ssh_host_rsa_key -N "" -C "" 2>/dev/null || true && \
+    ssh-keygen -t ed25519 -f /etc/ssh/ssh_host_ed25519_key -N "" -C "" 2>/dev/null || true && \
+    chmod 600 /etc/ssh/ssh_host_*_key && \
+    chmod 755 /etc/ssh
+
+# Set sandbox user password (required for some SSH clients)
+RUN echo "sandbox:huaweicloud" | chpasswd || true
+
+# Install missing SDK dependency required by latest huawei-cloud skill
+RUN pip3 install --break-system-packages huaweicloudsdklts
+
+# Create SSH home dir in /var/run (tmpfs, writable, proper permissions)
+RUN mkdir -p /var/run/sandbox/.ssh && \
+    chmod 700 /var/run/sandbox && \
+    chmod 700 /var/run/sandbox/.ssh && \
+    chown -R sandbox:sandbox /var/run/sandbox
+
+# Copy updated huawei-cloud skill from local directory
+COPY --chown=sandbox:sandbox skills/huawei-cloud /home/sandbox/skills/huawei-cloud
+
+# Create startup script that exports all container env vars to /etc/environment
+# so PAM (pam_env) can inject them into SSH login sessions.
+# Kubernetes envFrom vars are already in our environment - we just need to persist them
+# where PAM can find them.
+RUN printf '#!/bin/bash\n# Export all current env vars (including from Kubernetes envFrom) to /etc/environment\nenv | grep -v "^HOME\|^USER\|^SHELL\|^PATH\|^LOGNAME\|^MAIL\|^SSH\|^TERM\|^SHLVL\|^XDG" > /etc/environment\n# Also export vars that start with HUAWEI_ (credentials from secrets via envFrom)\nenv | grep "^HUAWEI_" >> /etc/environment 2>/dev/null || true\nexec /usr/sbin/sshd -D -e\n' > /entrypoint.sh && chmod +x /entrypoint.sh
+
+EXPOSE 22
+
+CMD ["/entrypoint.sh"]
