@@ -2,6 +2,9 @@
 
 ## 准备工作
 
+### 创建namespace
+kubectl create ns openclaw 
+
 ### ssh秘钥，用于gateway与sandbox之间互联
 
 手动执行：

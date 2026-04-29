@@ -78,7 +78,7 @@ sandbox:
         workspaceSubPath: workspace-bob
         envSecretRef: "bob-huawei-credentials"
         tools:
-          allow: ["read", "exec", "sessions_list", "sessions_history"]
+          allow: ["read", "exec", "sessions_list", "sessions_history", "sessions_send", "sessions_spawn", "session_status"]
           deny: ["write", "edit", "apply_patch", "delete", "browser"]
       - id: alice
         enabled: true
@@ -108,6 +108,12 @@ openclaw:
     minimax:
       apiKey: "${MINIMAX_API_KEY}"
 
+  # Agent-to-agent messaging (OFF by default, must be explicitly enabled)
+  # See: https://docs.openclaw.ai/concepts/multi-agent
+  agentToAgent:
+    enabled: true
+    allow: ["main", "alice", "bob"]
+
   agents:
     defaults:
       model: "minimax/MiniMax-M2.7"
@@ -115,35 +121,28 @@ openclaw:
       thinkingDefault: "low"
 
     # Agent definitions
+    # sandbox config is auto-injected from sandbox.agents.list by the configmap template
+    # do NOT define sandbox here — the template will overwrite it with correct DNS names
+    # name and default are required for the Control UI agent selector to display agents
     list:
       - id: main
+        default: true
+        name: Main
         workspace: ~/.openclaw/workspace-main
+        sandbox:
+          mode: "off"
         tools:
           allow: ["*"]
       - id: alice
+        name: Alice
         workspace: ~/.openclaw/workspace-alice
-        sandbox:
-          enabled: true
-          backend: ssh
-          scope: agent
-          workspaceAccess: rw
-          ssh:
-            target: "openclaw-sandbox-alice"
-            workspaceRoot: /home/openclaw/workspace
         tools:
           allow: ["*"]
       - id: bob
+        name: Bob
         workspace: ~/.openclaw/workspace-bob
-        sandbox:
-          enabled: true
-          backend: ssh
-          scope: agent
-          workspaceAccess: rw
-          ssh:
-            target: "openclaw-sandbox-bob"
-            workspaceRoot: /home/openclaw/workspace
         tools:
-          allow: ["read", "exec", "sessions_list", "sessions_history"]
+          allow: ["read", "exec", "sessions_list", "sessions_history", "sessions_send", "sessions_spawn", "session_status"]
           deny: ["write", "edit", "apply_patch", "delete", "browser"]
 
 # -----------------------------------------------------------------------------

@@ -107,11 +107,18 @@ spec:
                 echo "Initializing workspace files..."
                 mkdir -p /home/openclaw/.openclaw/workspace
                 cp /workspace-files/* /home/openclaw/.openclaw/workspace/ 2>/dev/null || true
-                chown -R 1000:1000 /home/openclaw/.openclaw/workspace
-                echo "Workspace initialized."
               else
                 echo "Workspace already exists, skipping initialization."
               fi
+              # Create per-agent workspace and agentDir directories for multi-agent setup
+              {{- if .Values.openclaw.agents.list }}
+              {{- range $agent := .Values.openclaw.agents.list }}
+              mkdir -p /home/openclaw/.openclaw/{{ $agent.workspace | replace "~/.openclaw/" "" }}
+              mkdir -p /home/openclaw/.openclaw/agents/{{ $agent.id }}/agent
+              mkdir -p /home/openclaw/.openclaw/agents/{{ $agent.id }}/sessions
+              {{- end }}
+              {{- end }}
+              chown -R 1000:1000 /home/openclaw/.openclaw
           securityContext:
             runAsUser: 0
             runAsNonRoot: false
@@ -256,6 +263,7 @@ spec:
           secret:
             secretName: {{ .Values.sandbox.sshSecretName | default (printf "%s-ssh-key" .Release.Name) }}
             optional: false
+            defaultMode: 0400
         {{- end }}
         - name: data
           {{- if .Values.persistence.enabled }}

@@ -282,6 +282,15 @@ openclaw:
   #       channel: telegram
   #       accountId: bob-bot
 
+  # -- Agent-to-agent messaging configuration (maps to tools.agentToAgent in openclaw.json)
+  # Off by default — must be explicitly enabled for agents to send messages to each other.
+  # See: https://docs.openclaw.ai/concepts/multi-agent
+  agentToAgent: {}
+  # Example:
+  #   agentToAgent:
+  #     enabled: true
+  #     allow: ["main", "alice", "bob"]
+
 # -- Custom workspace files for agent persona and ops templates
 # These files are copied to /home/openclaw/.openclaw/workspace on first install
 # Subsequent changes to these values will NOT overwrite existing files (to preserve agent experience)
