@@ -192,9 +192,11 @@ openclaw:
 # -----------------------------------------------------------------------------
 # OpenClaw 默认每天凌晨 4:00 自动重置会话，导致前一天上下文全部丢失
 # 运维场景必须禁用，保持会话连续性
+# 设置 mode: "idle" + 极大的 idleMinutes 来关闭自动清理
 session:
   reset:
-    mode: "never"           # 永不自动清理会话
+    mode: "idle"
+    idleMinutes: 525600   # 365天不活跃才重置（相当于禁用）
   maintenance:
     mode: "enforce"         # 自动清理过期会话文件
     pruneAfter: "90d"       # 90天后清理旧会话
