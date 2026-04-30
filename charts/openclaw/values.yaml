@@ -185,15 +185,36 @@ openclaw:
 
       # -- Context pruning configuration
       # Trims old tool results in-memory per request
+      # Recommended for ops: longer TTL to preserve troubleshooting context
       contextPruning:
         # -- Enable context pruning
         enabled: true
-        # -- Pruning mode: "cache-ttl"
+        # -- Pruning mode: "cache-ttl" or "off"
         mode: "cache-ttl"
-        # -- Cache TTL duration (e.g., "6h", "30m")
-        ttl: "6h"
+        # -- Cache TTL duration (e.g., "24h", "6h", "30m")
+        ttl: "24h"
         # -- Number of recent assistant messages to keep
-        keepLastAssistants: 3
+        keepLastAssistants: 10
+
+      # -- Memory search configuration (semantic + keyword hybrid search)
+      # Enables agent to search past operation records via memory_search tool
+      # Uses builtin SQLite backend with optional embedding provider
+      # See: https://docs.openclaw.ai/reference/memory-config
+      memorySearch: {}
+      # Example:
+      #   memorySearch:
+      #     enabled: true
+      #     query:
+      #       hybrid:
+      #         enabled: true
+      #         vectorWeight: 0.7
+      #         textWeight: 0.3
+      #         mmr:
+      #           enabled: true
+      #           lambda: 0.7
+      #         temporalDecay:
+      #           enabled: true
+      #           halfLifeDays: 60
 
     # -- Multi-agent configuration (maps to agents.list in openclaw.json)
     # Define multiple agents with different permissions for separation of duties
@@ -551,6 +572,33 @@ revisionHistoryLimit: 5
 #         redirectScheme:
 #           scheme: https
 extraManifests: []
+
+# =============================================================================
+# Session lifecycle configuration (top-level key in openclaw.json)
+# OpenClaw defaults to daily reset at 4AM — sessions auto-clear.
+# For ops agents that need persistent context across days, set reset.mode: "never".
+# =============================================================================
+# -- Session management (maps to session in openclaw.json)
+# See: https://docs.openclaw.ai/concepts/session
+session: {}
+# Example:
+#   session:
+#     dmScope: "per-channel-peer"  # Isolate DMs per sender
+#     reset:
+#       mode: "never"              # Never auto-reset sessions
+#     maintenance:
+#       mode: "enforce"
+#       pruneAfter: "90d"
+#       maxEntries: 1000
+
+# -- Memory backend configuration (maps to memory in openclaw.json)
+# For advanced memory backends (QMD, etc.)
+# See: https://docs.openclaw.ai/concepts/memory
+memory: {}
+# Example:
+#   memory:
+#     backend: "qmd"
+#     citations: "auto"
 
 # Probes configuration
 probes:

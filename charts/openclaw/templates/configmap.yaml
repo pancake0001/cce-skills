@@ -38,6 +38,9 @@ data:
     {{- $contextPruning := dict "mode" .Values.openclaw.agents.defaults.contextPruning.mode "ttl" .Values.openclaw.agents.defaults.contextPruning.ttl "keepLastAssistants" .Values.openclaw.agents.defaults.contextPruning.keepLastAssistants }}
     {{- $_ := set $agentDefaults "contextPruning" $contextPruning }}
     {{- end }}
+    {{- if .Values.openclaw.agents.defaults.memorySearch }}
+    {{- $_ := set $agentDefaults "memorySearch" .Values.openclaw.agents.defaults.memorySearch }}
+    {{- end }}
     {{- if and .Values.sandbox.enabled .Values.sandbox.agents.list (not .Values.openclaw.agents.list) }}
     {{- $sandboxDefaults := dict "mode" "all" "backend" "ssh" "scope" "agent" }}
     {{- $firstAgent := index .Values.sandbox.agents.list 0 }}
@@ -80,6 +83,12 @@ data:
     {{- end }}
     {{- $_ := set $agents "list" $agentsList }}
     {{- $_ := set $config "agents" $agents }}
+    {{- end }}
+    {{- if .Values.session }}
+    {{- $_ := set $config "session" .Values.session }}
+    {{- end }}
+    {{- if .Values.memory }}
+    {{- $_ := set $config "memory" .Values.memory }}
     {{- end }}
     {{- if .Values.openclaw.bindings }}
     {{- $_ := set $config "bindings" .Values.openclaw.bindings }}
