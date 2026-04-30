@@ -13,7 +13,7 @@ imagePullSecrets:
 # -----------------------------------------------------------------------------
 image:
   repository: swr.cn-north-4.myhuaweicloud.com/pancake/openclaw
-  tag: "2026.03.28-huawei-v2"
+  tag: "2026.3.23-huawei-v4"
   pullPolicy: IfNotPresent
 
 # -----------------------------------------------------------------------------
@@ -25,7 +25,7 @@ sandbox:
   # SSH sandbox image (on SWR - built with dropbear)
   image:
     repository: swr.cn-north-4.myhuaweicloud.com/pancake/openclaw-sandbox
-    tag: "2026.03.28-openssh-v11"
+    tag: "bookworm-slim-v13"
     pullPolicy: IfNotPresent
 
   # Shared workspace PVC (requires ReadWriteMany)
