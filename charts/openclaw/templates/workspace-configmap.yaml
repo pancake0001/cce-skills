@@ -6,22 +6,6 @@ metadata:
   labels:
     {{- include "openclaw.labels" . | nindent 4 }}
 data:
-  {{- if .Values.workspace.soul }}
-  SOUL.md: |
-    {{- .Values.workspace.soul | nindent 4 }}
-  {{- end }}
-  {{- if .Values.workspace.identity }}
-  IDENTITY.md: |
-    {{- .Values.workspace.identity | nindent 4 }}
-  {{- end }}
-  {{- if .Values.workspace.user }}
-  USER.md: |
-    {{- .Values.workspace.user | nindent 4 }}
-  {{- end }}
-  {{- if .Values.workspace.inspection }}
-  INSPECTION.md: |
-    {{- .Values.workspace.inspection | nindent 4 }}
-  {{- end }}
   {{- if .Values.workspace.alerts }}
   ALERTS.md: |
     {{- .Values.workspace.alerts | nindent 4 }}
@@ -38,13 +22,25 @@ data:
   GUARDRAILS.md: |
     {{- .Values.workspace.guardrails | nindent 4 }}
   {{- end }}
-  {{- if .Values.workspace.report }}
-  REPORT.md: |
-    {{- .Values.workspace.report | nindent 4 }}
+  {{- if .Values.workspace.tools }}
+  TOOLS.md: |
+    {{- .Values.workspace.tools | nindent 4 }}
   {{- end }}
-  {{- if .Values.workspace.agents }}
-  AGENTS.md: |
-    {{- .Values.workspace.agents | nindent 4 }}
+  {{- if .Values.workspace.user }}
+  USER.md: |
+    {{- .Values.workspace.user | nindent 4 }}
+  {{- end }}
+  {{- if .Values.workspace.bootstrap }}
+  BOOTSTRAP.md: |
+    {{- .Values.workspace.bootstrap | nindent 4 }}
+  {{- end }}
+  {{- if .Values.workspace.memory }}
+  MEMORY.md: |
+    {{- .Values.workspace.memory | nindent 4 }}
+  {{- end }}
+  {{- if .Values.workspace.inspection }}
+  INSPECTION.md: |
+    {{- .Values.workspace.inspection | nindent 4 }}
   {{- end }}
   {{- range $filename, $content := .Values.workspace.extraFiles }}
   {{ $filename }}: |

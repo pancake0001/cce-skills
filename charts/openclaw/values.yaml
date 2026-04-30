@@ -313,62 +313,58 @@ openclaw:
   #     allow: ["main", "alice", "bob"]
 
 # -- Custom workspace files for agent persona and ops templates
-# These files are copied to /home/openclaw/.openclaw/workspace on first install
+# These files are copied to each agent's workspace on first install.
+# For multi-agent mode, define per-agent files under workspace.agents.<agentId>.
+# Shared files (alerts/runbook/guardrails/knowledge) go to all agents.
 # Subsequent changes to these values will NOT overwrite existing files (to preserve agent experience)
 # To force update, delete the PVC and reinstall, or manually edit files in the container
 workspace:
   # -- Whether to enable custom workspace files
   enabled: true
-  # -- SOUL.md: Agent personality and behavior definition
-  soul: |
-    # SOUL
-
-    ## Core Identity
-    - You are a helpful AI assistant
-    - Always be concise and direct
-    - Prioritize accuracy over speed
-
-    ## Communication Style
-    - Use clear, simple language
-    - Avoid unnecessary explanations
-    - Respond in the user's language
-
-  # -- IDENTITY.md: Agent identity information
-  identity: |
-    # IDENTITY
-
-    Name: OpenClaw
-    Version: 2026.3
-    Role: AI Assistant
-
+  # -- SOUL.md: Agent personality and behavior definition (shared fallback)
+  # For multi-agent, override per agent under workspace.agents.<id>.soul
+  soul: ""
+  # -- IDENTITY.md: Agent identity information (shared fallback)
+  identity: ""
   # -- USER.md: User information (can be customized)
-  user: |
-    # USER
-
-    ## Preferences
-    - Language: 中文
-    - Timezone: UTC+8
-
+  user: ""
+  # -- AGENTS.md: Multi-agent collaboration guide (shared fallback)
+  agents: ""
+  # -- ALERTS.md: Alert handling rules (shared, goes to all agents)
+  alerts: ""
+  # -- RUNBOOK.md: Troubleshooting runbook (shared, goes to all agents)
+  runbook: ""
+  # -- KNOWLEDGE.md: Knowledge base for incidents (shared, goes to all agents)
+  knowledge: ""
+  # -- GUARDRAILS.md: Safety boundaries and prohibited operations (shared)
+  guardrails: ""
+  # -- TOOLS.md: Available tools per agent role (shared)
+  tools: ""
+  # -- USER.md: Operations team profile and preferences (shared)
+  user: ""
+  # -- BOOTSTRAP.md: One-time startup verification checklist (shared)
+  bootstrap: ""
+  # -- MEMORY.md: Long-term memory template (shared, agents will append to it)
+  memory: ""
   # -- INSPECTION.md: Inspection checklist (for ops agent)
   inspection: ""
+  # -- Per-agent workspace file overrides for multi-agent mode
+  # Keyed by agent ID. Each agent gets its own SOUL.md, IDENTITY.md, AGENTS.md.
+  # Shared files (alerts/runbook/knowledge/guardrails) are still copied from the top-level values.
+  agents: {}
+  # Example:
+  #   agents:
+  #     main:
+  #       soul: |
+  #         # SOUL for 调度中心...
+  #       identity: |
+  #         # IDENTITY for 调度中心...
+  #       agents: |
+  #         # AGENTS.md from 调度中心 perspective...
+  #     alice:
+  #       soul: |
+  #         # SOUL for Alice...
 
-  # -- ALERTS.md: Alert handling rules (for ops agent)
-  alerts: ""
-
-  # -- RUNBOOK.md: Troubleshooting runbook (for ops agent)
-  runbook: ""
-
-  # -- KNOWLEDGE.md: Knowledge base for incidents (for ops agent)
-  knowledge: ""
-
-  # -- GUARDRAILS.md: Safety boundaries and prohibited operations
-  guardrails: ""
-
-  # -- REPORT.md: Report templates
-  report: ""
-
-  # -- AGENTS.md: Multi-agent collaboration guide
-  agents: ""
 
   # -- Additional custom files
   # Key is filename, value is content
