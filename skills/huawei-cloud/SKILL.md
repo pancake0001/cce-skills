@@ -31,6 +31,7 @@ AK/SK仅支持以下两种方式使用：
 | `huawei_delete_cce_node` | 删除 | 删除集群节点 |
 | `huawei_delete_cce_cluster` | 删除 | 删除整个CCE集群 |
 | `huawei_scale_cce_workload` | 扩缩容 | 调整Deployment/StatefulSet副本数 |
+| `huawei_resize_cce_workload` | 扩缩容 | 调整工作负载副本数+资源限制（CPU/Memory limit/request） |
 | `huawei_delete_cce_workload` | 删除 | 删除工作负载（Deployment/StatefulSet） |
 | `huawei_reboot_ecs` | 重启 | 重启ECS实例（强制重启风险更高） |
 | `huawei_hibernate_cce_cluster` | 休眠 | 休眠集群并停止所有工作负载，暂停控制面计费 |
@@ -218,6 +219,7 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_get_cce_pods` | 查询集群内Pod列表（支持 labels 过滤） |
 | `huawei_get_cce_deployments` | 查询集群内Deployment列表 |
 | `huawei_scale_cce_workload` | 扩缩容Deployment/StatefulSet工作负载副本数 |
+| `huawei_resize_cce_workload` | 调整工作负载副本数+资源限制（CPU/Memory limit/request）⭐ 新增 |
 | `huawei_get_cce_services` | 查询集群内Service列表 |
 | `huawei_get_cce_ingresses` | 查询集群内Ingress列表 |
 | `huawei_get_cce_events` | 查询集群事件列表 |
@@ -290,7 +292,7 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 | `huawei_aggregate_inspection_results` | 结果汇总 | 汇总Subagent巡检结果 |
 | `huawei_export_inspection_report` | 报告生成 | 导出HTML格式完整巡检报告 |
 
-**8大检查项（可独立调用）：**
+**9大检查项（可独立调用）：**
 | 工具 | 功能 |
 |------|------|
 | `huawei_pod_status_inspection` | Pod状态巡检（异常状态、容器重启次数） |
@@ -314,10 +316,14 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 **诊断流程（近1小时数据）：**
 
 1. **分析工作负载监控** - 检查CPU/内存是否有异常上涨，是否有相关告警
-2. **梳理网络链路** - 绘制完整链路图（Pod → Service → Ingress → Nginx-Ingress → ELB → NAT → EIP）
-3. **分析链路组件** - 检查ELB/EIP/NAT/节点的监控和告警
-4. **检查事件日志** - 查看工作负载相关的事件和日志
+2. **梳理网络链路** - 绘制完整链路图（比如Pod → Service → Ingress → Nginx-Ingress → ELB → NAT → EIP）
+3. **分析链路组件** - 检查ELB/EIP/NAT/节点的监控和告警，如果涉及ELB链路，则检查ELB监听器和后端服务器的监控和告警；如果对接了ingress，则检查相关配置；如果涉及NAT链路，则检查NAT网关的监控和告警；如果涉及节点链路，则检查节点的监控和告警；如果涉及EIP链路，则检查EIP的监控和告警。
+4. **检查事件日志** - 查看工作负载相关的事件和日志，分析是否有网络相关的错误或异常事件
 5. **检查CoreDNS** - 分析CoreDNS监控、告警和配置
+
+**特别注意：**
+先罗列以上5个步骤的任务清单，每完成一项后，在任务清单中标记已完成，并输出当前进度百分比，直到所有任务都标记已完成执行，最后再输出完整诊断报告，避免诊断步骤遗漏或顺序错误。 
+
 
 **输出报告包含：**
 - 工作负载基本信息（Pod、节点、Service、Ingress、ELB、NAT、EIP）
@@ -325,6 +331,7 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 - 网络链路拓扑图（异常组件标记红色）
 - 已执行操作及效果
 - 下一步建议
+以上几点必须在报告中完整呈现，不能遗漏或顺序错误。
 
 #### 工作负载问题诊断
 
@@ -334,16 +341,21 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 | `huawei_workload_diagnose_by_alarm` | 基于告警的工作负载诊断 | 触发告警的工作负载 |
 
 **诊断流程(近1小时数据)：**
+1.  **AOM告警查询** - 获取工作负载相关的告警，分析是否有资源、网络、系统等相关告警，使用huawei_list_aom_alarms，尤其要关注CPU,内存，流量相关的告警信息，注意，这些告警不管他是否恢复，都要去查询监控来判断是否有资源瓶颈，内存的告警也是一样的道理，流量相关的告警也是一样的道理，如果有相关告警，不管他是否恢复了，都要去查询监控数据来分析是否有资源瓶颈或者异常趋势。
+2. **收集工作负载信息** - 工作负载名称、namespace、副本数、Pod状态、异常比例
+3. **收集监控数据** - CPU/内存使用率、重启次数、事件日志等，可以使用huawei_get_cce_pod_metrics及huawei_get_cce_pod_metrics_topN工具获取监控数据，获取监控数据后，绘制出监控数据的时序图，分析是否有资源瓶颈或异常趋势
+4. **异常Pod诊断** - 挑选最多3个异常Pod进行诊断，参考CCE_Workload_Troubleshooting_Guide.md
+5. **节点诊断** - 调用节点诊断工具分析工作负载所在节点
+6. **网络链路诊断** - 调用网络诊断工具分析Service/Ingress/ELB/EIP链路
+7. **变更关联分析** - 分析最近1小时内是否有相关的配置变更或版本更新，可能引入了新的问题
 
-1. **收集工作负载信息** - 工作负载名称、namespace、副本数、Pod状态、异常比例
-2. **异常Pod诊断** - 挑选最多3个异常Pod进行诊断，参考CCE_Workload_Troubleshooting_Guide.md
-3. **节点诊断** - 调用节点诊断工具分析工作负载所在节点
-4. **网络链路诊断** - 调用网络诊断工具分析Service/Ingress/ELB/EIP链路
-5. **变更关联分析** - 分析scaled/created/updated/restarted等变更事件与故障的关联
-6. **AOM告警查询** - 获取工作负载相关的监控告警
+**特别注意：**
+先罗列以上7个步骤的任务清单，每完成一项后，在任务清单中标记已完成，并输出当前进度百分比，直到所有任务都标记已完成执行，最后再输出完整诊断报告，避免诊断步骤遗漏或顺序错误。 
+注意，诊断报告中必须包含以上7个步骤执行的结果，且不能遗漏或顺序错误。
 
 **输出报告包含：**
 - 工作负载基本信息（Deployment/StatefulSet、Pod、节点、Service、Ingress、ELB、NAT、EIP）
+- 监控数据分析（CPU/内存使用率、重启次数、事件日志等），监控图表展示
 - 异常Pod分析（状态、事件、日志）
 - 节点诊断结果汇总
 - 网络链路诊断结果汇总
@@ -369,6 +381,9 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 4. **分析工作负载** - 节点上Pod的资源占用情况
 5. **检查VPC安全组** - 针对NotReady节点检查Master-Node通信
 
+**特别注意：**
+先罗列以上5个步骤的任务清单，每完成一项后，在任务清单中标记已完成，并输出当前进度百分比，直到所有任务都标记已完成执行，最后再输出完整诊断报告，避免诊断步骤遗漏或顺序错误。 
+
 **批量诊断规则：**
 - 单次最多分析10个节点
 - 超过10个节点自动写入文件（/root/.openclaw/workspace/report/）
@@ -392,17 +407,18 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 
 ### 📊 AOM 应用运维管理
 
-| 工具 | 功能 |
-|------|------|
-| `huawei_list_aom_instances` | 查询AOM实例列表 |
-| `huawei_get_aom_metrics` | 使用PromQL查询AOM监控指标 |
-| `huawei_list_aom_alerts` | 查询AOM告警列表 |
-| `huawei_list_aom_current_alarms` | 查询当前活跃告警 |
-| `huawei_list_aom_alarm_rules` | 查询AOM告警规则列表 |
-| `huawei_list_aom_action_rules` | 查询AOM动作规则列表 |
-| `huawei_list_aom_mute_rules` | 查询AOM静默规则列表 |
-| `huawei_query_aom_logs` | 按命名空间/Pod过滤查询AOM应用日志 |
-| `huawei_aom_alarm_inspection` | AOM活跃告警巡检 |
+| 工具 | 功能 | 说明 |
+|------|------|------|
+| `huawei_list_aom_alarms` | 查询所有告警 (活跃+历史) | ⭐ 推荐：默认查询最近1小时所有告警，支持 `hours` 参数 |
+| `huawei_list_aom_current_alarms` | 查询当前活跃告警 | 需指定 `event_type` 参数 |
+| `huawei_list_aom_alerts` | 查询AOM告警列表 | 查询告警规则触发记录 |
+| `huawei_list_aom_alarm_rules` | 查询AOM告警规则列表 | 阈值/事件告警规则 |
+| `huawei_list_aom_action_rules` | 查询AOM动作规则列表 | 告警通知规则 |
+| `huawei_list_aom_mute_rules` | 查询AOM静默规则列表 | 静默规则 |
+| `huawei_list_aom_instances` | 查询AOM实例列表 | Prometheus实例 |
+| `huawei_get_aom_metrics` | 使用PromQL查询AOM监控指标 | 自定义PromQL查询 |
+| `huawei_query_aom_logs` | 按命名空间/Pod过滤查询AOM应用日志 | 应用日志 |
+| `huawei_aom_alarm_inspection` | AOM活跃告警巡检 | 集群巡检 |
 
 ---
 
@@ -498,6 +514,9 @@ python3 huawei-cloud.py huawei_list_cce_clusters region=cn-north-4
 # 扩缩容工作负载
 python3 huawei-cloud.py huawei_scale_cce_workload region=cn-north-4 cluster_id=xxx workload_type=Deployment name=nginx namespace=default replicas=3
 
+# 调整工作负载资源限制（需二次确认）
+python3 huawei-cloud.py huawei_resize_cce_workload region=cn-north-4 cluster_id=xxx workload_type=deployment name=nginx namespace=default replicas=5 cpu_limit=4 memory_limit=1Gi confirm=true
+
 # CCE集群并行巡检
 python3 huawei-cloud.py huawei_cce_cluster_inspection_parallel region=cn-north-4 cluster_id=xxx
 
@@ -530,11 +549,11 @@ python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 | `huawei_hss_change_vul_status` | 修改漏洞状态（忽略/修复/验证，confirm=true）|
 
 > CCE 节点操作（cordon / drain / uncordon）属于对应章节，详见 ☸️ CCE 云容器引擎 → 节点管理。
-
 ### 漏洞状态
 
 > 官方 8 种漏洞状态：`unfix` / `ignored` / `verified` / `fixing` / `fixed` / `reboot` / `failed` / `fix_after_reboot`。
 > ⚠️ 节点漏洞修复详细指南见 [CCE_NODE_VUL_FIX.md](./references/CCE_NODE_VUL_FIX.md)，包含完整工作流和踩坑记录。
+
 
 ## Notes
 - Ensure your AK/SK has proper IAM permissions for the requested resources
@@ -544,7 +563,6 @@ python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 - CCE cluster operations require appropriate Kubernetes RBAC permissions
 
 ## References
-
 - [CCE节点漏洞修复指南](./references/CCE_NODE_VUL_FIX.md)
 - [CCE安全组配置说明](./references/CCE_Security_Group_Configuration.md)
 - [CCE节点故障检测策略配置指南](./references/CCE_Node_Fault_Detection_Configuration.md)
