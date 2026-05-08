@@ -9,6 +9,8 @@ import json
 from . import aom, cce, cce_metrics, ecs, elb, hss, identity, network, storage
 from . import cce_inspection
 from . import cce_diagnosis
+from . import cce_auto_inspection
+from . import chart_generator
 from . import common
 
 # cce_app_logs and lts require huaweicloudsdklts which may not be installed
@@ -199,6 +201,20 @@ def _scale_cce_workload(params: Dict[str, str]) -> Dict[str, Any]:
     return cce.scale_cce_workload(params["region"], params["cluster_id"], params["workload_type"], params["name"], params["namespace"], int(params["replicas"]), params.get("confirm", "").lower() == "true", params.get("ak"), params.get("sk"), params.get("project_id"))
 
 
+def _resize_cce_workload(params: Dict[str, str]) -> Dict[str, Any]:
+    replicas = int(params["replicas"]) if params.get("replicas") else None
+    return cce.resize_cce_workload(
+        params["region"], params["cluster_id"], params["workload_type"], params["name"], params["namespace"],
+        replicas=replicas,
+        cpu_limit=params.get("cpu_limit"),
+        memory_limit=params.get("memory_limit"),
+        cpu_request=params.get("cpu_request"),
+        memory_request=params.get("memory_request"),
+        confirm=params.get("confirm", "").lower() == "true",
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id")
+    )
+
+
 def _delete_cce_workload(params: Dict[str, str]) -> Dict[str, Any]:
     return cce.delete_cce_workload(params["region"], params["cluster_id"], params["workload_type"], params["name"], params["namespace"], params.get("confirm", "").lower() == "true", params.get("ak"), params.get("sk"), params.get("project_id"))
 
@@ -269,6 +285,19 @@ def _list_aom_mute_rules(params: Dict[str, str]) -> Dict[str, Any]:
 
 def _list_aom_current_alarms(params: Dict[str, str]) -> Dict[str, Any]:
     return aom.list_aom_current_alarms(params["region"], params.get("ak"), params.get("sk"), params.get("project_id"), params.get("event_type", "active_alert"), params.get("event_severity"), params.get("time_range"), _to_int(params.get("limit"), 100))
+
+
+def _list_aom_alarms(params: Dict[str, str]) -> Dict[str, Any]:
+    return aom.list_aom_alarms(
+        region=params["region"],
+        ak=params.get("ak"),
+        sk=params.get("sk"),
+        project_id=params.get("project_id"),
+        hours=_to_int(params.get("hours"), 1),
+        event_severity=params.get("event_severity"),
+        cluster_name=params.get("cluster_name"),
+        limit=_to_int(params.get("limit"), 500),
+    )
 
 
 def _list_log_groups(params: Dict[str, str]) -> Dict[str, Any]:
@@ -454,24 +483,40 @@ def _node_diagnose_action(params):
     return {"success": True, "region": region, "action": "node_diagnose", "cluster_id": cluster_id, "node_ip": node_ip, "result": diagnose_result}
 
 
+def _flatten_diagnosis_result(raw):
+    """workload_diagnose 返回 {success, diagnosis, report}，展平 diagnosis 到顶层"""
+    if not raw.get("success"):
+        return raw
+    diag = raw.get("diagnosis", {})
+    report = raw.get("report", {})
+    flat = dict(diag)
+    flat["success"] = True
+    flat["report"] = report
+    return flat
+
+
 def _workload_diagnose_action(params):
     try:
-        return cce_diagnosis.workload_diagnose(
+        raw = cce_diagnosis.workload_diagnose(
             params["region"], params["cluster_id"],
             params.get("workload_name"), params.get("namespace", "default"),
             params.get("ak"), params.get("sk"), params.get("project_id"),
-            params.get("fault_time")
+            params.get("fault_time"),
+            int(params.get("hours", 6))
         )
+        return _flatten_diagnosis_result(raw)
     except Exception as exc:
         return {"success": False, "error": str(exc), "error_type": type(exc).__name__, "stage": "workload_diagnose"}
 
 
 def _workload_diagnose_by_alarm_action(params):
     try:
-        return cce_diagnosis.workload_diagnose_by_alarm(
+        raw = cce_diagnosis.workload_diagnose_by_alarm(
             params["region"], params["cluster_id"], params["alarm_info"],
-            params.get("ak"), params.get("sk"), params.get("project_id")
+            params.get("ak"), params.get("sk"), params.get("project_id"),
+            int(params.get("hours", 6))
         )
+        return _flatten_diagnosis_result(raw)
     except Exception as exc:
         return {"success": False, "error": str(exc), "error_type": type(exc).__name__, "stage": "workload_diagnose_by_alarm"}
 
@@ -573,6 +618,146 @@ def _cce_node_status(params: Dict[str, str]) -> Dict[str, Any]:
         region=params["region"], cluster_id=params["cluster_id"], node_name=params["node_name"],
         ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"))
 
+def _bind_cce_cluster_eip(params: Dict[str, str]) -> Dict[str, Any]:
+    return cce.bind_cce_cluster_eip(
+        region=params["region"], cluster_id=params["cluster_id"], eip_id=params["eip_id"],
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"))
+
+
+def _unbind_cce_cluster_eip(params: Dict[str, str]) -> Dict[str, Any]:
+    return cce.unbind_cce_cluster_eip(
+        region=params["region"], cluster_id=params["cluster_id"],
+        ak=params.get("ak"), sk=params.get("sk"), project_id=params.get("project_id"))
+
+
+def _generate_monitor_dashboard(params: Dict[str, str]) -> Dict[str, Any]:
+    extra_promql = None
+    if params.get("extra_promql"):
+        try:
+            extra_promql = json.loads(params["extra_promql"])
+        except (json.JSONDecodeError, TypeError):
+            extra_promql = None
+    return chart_generator.generate_monitor_dashboard(
+        region=params["region"],
+        cluster_id=params["cluster_id"],
+        ak=params.get("ak"),
+        sk=params.get("sk"),
+        project_id=params.get("project_id"),
+        namespace=params.get("namespace"),
+        label_selector=params.get("label_selector"),
+        hours=_to_int(params.get("hours"), 1),
+        include_network=params.get("include_network", "true").lower() != "false",
+        top_n=_to_int(params.get("top_n"), 10),
+        output_file=params.get("output_file"),
+        title=params.get("title"),
+        tz_offset_hours=_to_int(params.get("tz_offset_hours"), 8),
+        inline_js=params.get("inline_js", "true").lower() != "false",
+        extra_promql=extra_promql,
+    )
+
+
+def _generate_diagnosis_report(params: Dict[str, str]) -> Dict[str, Any]:
+    """Dispatch wrapper for generate_diagnosis_report."""
+    return chart_generator.generate_diagnosis_report(
+        region=params["region"],
+        cluster_id=params["cluster_id"],
+        workload_name=params["workload_name"],
+        namespace=params.get("namespace", "default"),
+        ak=params.get("ak"),
+        sk=params.get("sk"),
+        project_id=params.get("project_id"),
+        fault_time=params.get("fault_time"),
+        hours=_to_int(params.get("hours"), 1),
+        output_file=params.get("output_file"),
+    )
+
+
+def _analyze_aom_alarms(params: Dict[str, str]) -> Dict[str, Any]:
+    """Dispatch wrapper for analyze_aom_alarms."""
+    return aom.analyze_aom_alarms(
+        region=params["region"],
+        ak=params.get("ak"),
+        sk=params.get("sk"),
+        project_id=params.get("project_id"),
+        cluster_name=params.get("cluster_name"),
+        hours=_to_int(params.get("hours"), 1),
+        chronic_threshold=_to_int(params.get("chronic_threshold"), 5),
+        sudden_window_minutes=_to_int(params.get("sudden_window_minutes"), 10),
+    )
+
+
+def _cce_quick_check_action(params: Dict[str, str]) -> Dict[str, Any]:
+    """快检：3 个 API，< 30s，判断是否有异常"""
+    # Parse optional thresholds
+    thresholds = None
+    if params.get("thresholds"):
+        try:
+            thresholds = json.loads(params["thresholds"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Parse optional elb_ids
+    elb_ids = None
+    if params.get("elb_ids"):
+        elb_ids = [e.strip() for e in params["elb_ids"].split(",") if e.strip()]
+
+    return cce_auto_inspection.cce_quick_check(
+        region=params["region"],
+        cluster_id=params["cluster_id"],
+        ak=params.get("ak"),
+        sk=params.get("sk"),
+        project_id=params.get("project_id"),
+        thresholds=thresholds,
+        elb_ids=elb_ids,
+    )
+
+
+def _cce_deep_diagnosis_action(params: Dict[str, str]) -> Dict[str, Any]:
+    """深度诊断：快检发现异常后调用，6+ 个 API 全链路诊断"""
+    quick_check_result = None
+    if params.get("quick_check_result"):
+        try:
+            quick_check_result = json.loads(params["quick_check_result"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return cce_auto_inspection.cce_deep_diagnosis(
+        region=params["region"],
+        cluster_id=params["cluster_id"],
+        quick_check_result=quick_check_result,
+        ak=params.get("ak"),
+        sk=params.get("sk"),
+        project_id=params.get("project_id"),
+        notify_email=params.get("notify_email"),
+        report_file=params.get("report_file"),
+    )
+
+
+def _cce_auto_inspection_action(params: Dict[str, str]) -> Dict[str, Any]:
+    """自动巡检：快检 + 判断 + (诊断 | HEARTBEAT_OK) 一步到位"""
+    thresholds = None
+    if params.get("thresholds"):
+        try:
+            thresholds = json.loads(params["thresholds"])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    elb_ids = None
+    if params.get("elb_ids"):
+        elb_ids = [e.strip() for e in params["elb_ids"].split(",") if e.strip()]
+
+    return cce_auto_inspection.cce_auto_inspection(
+        region=params["region"],
+        cluster_id=params["cluster_id"],
+        ak=params.get("ak"),
+        sk=params.get("sk"),
+        project_id=params.get("project_id"),
+        thresholds=thresholds,
+        elb_ids=elb_ids,
+        notify_email=params.get("notify_email"),
+    )
+
+
 def _reboot_ecs(params: Dict[str, str]) -> Dict[str, Any]:
     return ecs.reboot_ecs_instance(
         region=params["region"], instance_id=params["instance_id"],
@@ -620,6 +805,7 @@ ACTION_SPECS: Dict[str, tuple[tuple[str, ...], Handler]] = {
     "huawei_get_cce_namespaces": (("region", "cluster_id"), _get_cce_namespaces),
     "huawei_get_cce_deployments": (("region", "cluster_id"), _get_cce_deployments),
     "huawei_scale_cce_workload": (("region", "cluster_id", "workload_type", "name", "namespace", "replicas"), _scale_cce_workload),
+    "huawei_resize_cce_workload": (("region", "cluster_id", "workload_type", "name", "namespace"), _resize_cce_workload),
     "huawei_delete_cce_workload": (("region", "cluster_id", "workload_type", "name", "namespace"), _delete_cce_workload),
     "huawei_get_kubernetes_nodes": (("region", "cluster_id"), _get_kubernetes_nodes),
     "huawei_get_cce_events": (("region", "cluster_id"), _get_cce_events),
@@ -639,6 +825,7 @@ ACTION_SPECS: Dict[str, tuple[tuple[str, ...], Handler]] = {
     "huawei_list_aom_action_rules": (("region",), _list_aom_action_rules),
     "huawei_list_aom_mute_rules": (("region",), _list_aom_mute_rules),
     "huawei_list_aom_current_alarms": (("region",), _list_aom_current_alarms),
+    "huawei_list_aom_alarms": (("region",), _list_aom_alarms),
     "huawei_list_log_groups": (("region",), _list_log_groups),
     "huawei_list_log_streams": (("region",), _list_log_streams),
     "huawei_query_logs": (("region", "log_group_id", "log_stream_id"), _query_logs),
@@ -690,6 +877,24 @@ ACTION_SPECS: Dict[str, tuple[tuple[str, ...], Handler]] = {
 
     # ECS operations
     "huawei_reboot_ecs": (("region", "instance_id"), _reboot_ecs),
+
+    # CCE EIP operations
+    "huawei_bind_cce_cluster_eip": (("region", "cluster_id", "eip_id"), _bind_cce_cluster_eip),
+    "huawei_unbind_cce_cluster_eip": (("region", "cluster_id"), _unbind_cce_cluster_eip),
+
+    # Monitor dashboard generation
+    "huawei_generate_monitor_dashboard": (("region", "cluster_id"), _generate_monitor_dashboard),
+
+    # Diagnosis report generation
+    "huawei_generate_diagnosis_report": (("region", "cluster_id", "workload_name"), _generate_diagnosis_report),
+
+    # Alarm filtering & analysis
+    "huawei_analyze_aom_alarms": (("region",), _analyze_aom_alarms),
+
+    # ===== Auto Inspection (Quick Check + Deep Diagnosis) =====
+    "huawei_cce_quick_check": (("region", "cluster_id"), _cce_quick_check_action),
+    "huawei_cce_deep_diagnosis": (("region", "cluster_id"), _cce_deep_diagnosis_action),
+    "huawei_cce_auto_inspection": (("region", "cluster_id"), _cce_auto_inspection_action),
 }
 
 
