@@ -27,7 +27,7 @@ from .cce import (
     get_kubernetes_events, get_kubernetes_services, get_kubernetes_nodes,
     get_kubernetes_pods, list_cce_clusters, list_cce_cluster_nodes,
 )
-from .aom import list_aom_current_alarms, get_aom_prom_metrics_http, list_aom_instances
+from .aom import list_aom_current_alarms, list_aom_alarms, get_aom_prom_metrics_http, list_aom_instances
 from .elb import get_elb_metrics
 from .network import get_eip_metrics, list_eip_addresses
 from .hss import list_vul_host_hosts
@@ -147,12 +147,15 @@ def event_inspection(region: str, cluster_id: str, ak: str, sk: str, project_id:
 
 
 def aom_alarm_inspection(region: str, cluster_id: str, cluster_name: str, ak: str, sk: str, project_id: str = None) -> Dict[str, Any]:
-    """AOM 告警巡检
+    """AOM 告警巡检（活跃+历史合并）
     
     检查内容：
-    - 获取当前活跃告警
+    - 获取活跃告警 + 历史已恢复告警（合并去重）
     - 严重级别分类 (Critical/Major/Minor/Info)
     - 按告警类型归一统计
+    - 重点标注资源类告警(CPU/内存/磁盘等)不管是否恢复
+    
+    重要原则：只查活跃告警会漏掉已恢复的关键告警，必须同时查历史！
     
     Args:
         region: 华为云区域
@@ -172,9 +175,12 @@ def aom_alarm_inspection(region: str, cluster_id: str, cluster_name: str, ak: st
         "status": "PASS",
         "checked": False,
         "total": 0,
+        "firing_count": 0,
+        "resolved_count": 0,
         "severity_breakdown": {},
         "cluster_alarms": [],
-        "alarms_by_type": {}
+        "alarms_by_type": {},
+        "resource_alarms": []
     }
     
     issues = []
@@ -188,13 +194,15 @@ def aom_alarm_inspection(region: str, cluster_id: str, cluster_name: str, ak: st
         })
     
     try:
-        alarm_result = list_aom_current_alarms(
+        # 同时查活跃+历史告警，合并去重
+        alarm_result = list_aom_alarms(
             region=region,
             ak=access_key,
             sk=secret_key,
             project_id=proj_id,
-            event_type="active_alert",
-            limit=100
+            cluster_name=cluster_name,
+            hours=1,
+            limit=500
         )
         
         if alarm_result.get("success"):
@@ -202,10 +210,20 @@ def aom_alarm_inspection(region: str, cluster_id: str, cluster_name: str, ak: st
             alarms = alarm_result.get("events", [])
             
             result["total"] = len(alarms)
+            result["firing_count"] = alarm_result.get("firing_count", 0)
+            result["resolved_count"] = alarm_result.get("resolved_count", 0)
             
             severity_breakdown = {"Critical": 0, "Major": 0, "Minor": 0, "Info": 0}
             cluster_alarms = []
             alarms_by_type = {}
+            resource_alarms = []
+            
+            RESOURCE_KEYWORDS = [
+                'CPU', 'cpu', 'Memory', 'memory', '内存', '磁盘', 'Disk',
+                'OOM', 'oom', 'Evicted', 'evicted', '驱赶',
+                'CrashLoopBackOff', 'crashloopbackoff',
+                'Pressure', 'pressure', '压力'
+            ]
             
             for alarm in alarms:
                 severity = alarm.get("event_severity", "Info")
@@ -214,14 +232,32 @@ def aom_alarm_inspection(region: str, cluster_id: str, cluster_name: str, ak: st
                 
                 alarm_type = alarm.get("event_name", "Unknown")
                 if alarm_type not in alarms_by_type:
-                    alarms_by_type[alarm_type] = {"count": 0, "alarms": []}
+                    alarms_by_type[alarm_type] = {"count": 0, "firing": 0, "resolved": 0, "alarms": []}
                 alarms_by_type[alarm_type]["count"] += 1
+                if alarm.get("status") == "firing":
+                    alarms_by_type[alarm_type]["firing"] += 1
+                else:
+                    alarms_by_type[alarm_type]["resolved"] += 1
                 alarms_by_type[alarm_type]["alarms"].append({
                     "name": alarm.get("event_name"),
                     "severity": severity,
+                    "status": alarm.get("status"),
                     "resource_id": alarm.get("resource_id"),
                     "message": (alarm.get("message", ""))[:200]
                 })
+                
+                # 检查是否为资源类告警
+                alarm_text = alarm_type + ' ' + alarm.get("message", "")
+                is_resource_alarm = any(kw in alarm_text for kw in RESOURCE_KEYWORDS)
+                if is_resource_alarm:
+                    resource_alarms.append({
+                        "name": alarm.get("event_name"),
+                        "severity": severity,
+                        "status": alarm.get("status"),
+                        "pod_name": alarm.get("pod_name"),
+                        "namespace": alarm.get("namespace"),
+                        "message": (alarm.get("message", ""))[:200]
+                    })
                 
                 resource_id = alarm.get("resource_id", "")
                 alarm_cluster_id = alarm.get("cluster_id", "")
@@ -231,6 +267,7 @@ def aom_alarm_inspection(region: str, cluster_id: str, cluster_name: str, ak: st
                     cluster_alarms.append({
                         "name": alarm.get("event_name"),
                         "severity": severity,
+                        "status": alarm.get("status"),
                         "resource_id": resource_id,
                         "message": (alarm.get("message", ""))[:200],
                         "pod_name": alarm.get("pod_name"),
@@ -238,17 +275,21 @@ def aom_alarm_inspection(region: str, cluster_id: str, cluster_name: str, ak: st
                     })
                     if severity == "Critical":
                         add_issue("CRITICAL", "重要告警", alarm.get("event_name"),
-                            f"严重级别: {severity}, 资源: {resource_id}")
-                    elif severity == "Major":
-                        add_issue("WARNING", "重要告警", alarm.get("event_name"),
-                            f"严重级别: {severity}, 资源: {resource_id}")
+                            f"严重级别: {severity}, 状态: {alarm.get('status','')}, 资源: {resource_id}")
+                    elif severity == "Major" and is_resource_alarm:
+                        # 资源类 Major 告警即使已恢复也要告警
+                        add_issue("WARNING", "资源告警", alarm.get("event_name"),
+                            f"严重级别: {severity}, 状态: {alarm.get('status','')}, 资源: {resource_id}")
             
             result["severity_breakdown"] = severity_breakdown
-            result["cluster_alarms"] = cluster_alarms[:20]
-            result["alarms_by_type"] = {k: v for k, v in list(alarms_by_type.items())[:20]}
+            result["cluster_alarms"] = cluster_alarms[:30]
+            result["alarms_by_type"] = {k: v for k, v in list(alarms_by_type.items())[:30]}
+            result["resource_alarms"] = resource_alarms[:20]
             
             if severity_breakdown.get("Critical", 0) > 0:
                 result["status"] = "FAIL"
+            elif severity_breakdown.get("Major", 0) > 0 and resource_alarms:
+                result["status"] = "WARN"
             elif severity_breakdown.get("Major", 0) > 0:
                 result["status"] = "WARN"
         else:

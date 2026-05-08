@@ -1,1 +1,27 @@
+# Python
 __pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Vendor JS (bundled dependencies, not source code)
+skills/huawei-cloud/scripts/huawei_cloud/_vendor/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Config with secrets
+huawei_cce_config.json

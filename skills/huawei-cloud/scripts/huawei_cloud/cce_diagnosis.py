@@ -186,7 +186,7 @@ def get_namespace_workloads(region: str, cluster_id: str, namespace: str,
                 "status": pod.get("status"),
                 "ready": pod.get("ready"),
                 "restart_count": pod.get("restart_count", 0),
-                "node_ip": pod.get("host_ip"),
+                "node_ip": pod.get("host_ip") or pod.get("node"),
                 "pod_ip": pod.get("ip"),
                 "age": pod.get("age"),
                 "creation_timestamp": pod.get("creation_timestamp")
@@ -502,19 +502,21 @@ def get_pod_metrics(pod_name: str, namespace: str, cluster_name: str,
     return metrics_result
 
 
-def get_node_metrics(node_ip: str, region: str, ak: str, sk: str,
+def get_node_metrics(node_ip: str, region: str, cluster_id: str = "", ak: str = None, sk: str = None,
                     project_id: str = None, hours: int = 1) -> Dict[str, Any]:
     """获取节点监控指标"""
     try:
         access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
+        aom_result = get_aom_instance(region, cluster_id, access_key, secret_key, proj_id)
+        aom_id = aom_result.get("aom_instance_id", "") if aom_result.get("success") else ""
 
-        cpu_query = f'100 - (avg by (instance) (irate(node_cpu_seconds_total{{mode="idle",instance=~"{node_ip}:.*"}}[5m])) * 100)'
-        memory_query = f'(1 - (node_memory_MemAvailable_bytes{{instance=~"{node_ip}:.*"}} / node_memory_MemTotal_bytes{{instance=~"{node_ip}:.*"}})) * 100'
-        disk_query = f'(1 - (node_filesystem_avail_bytes{{mountpoint="/",instance=~"{node_ip}:.*"}} / node_filesystem_size_bytes{{mountpoint="/",instance=~"{node_ip}:.*"}})) * 100'
+        cpu_query = f'100 - (avg by (instance) (irate(node_cpu_seconds_total{{mode="idle",instance="{node_ip}"}}[5m])) * 100)'
+        memory_query = f'(1 - (node_memory_MemAvailable_bytes{{instance="{node_ip}"}} / node_memory_MemTotal_bytes{{instance="{node_ip}"}})) * 100'
+        disk_query = f'(1 - (node_filesystem_avail_bytes{{mountpoint="/",instance="{node_ip}"}} / node_filesystem_size_bytes{{mountpoint="/",instance="{node_ip}"}})) * 100'
 
-        cpu_result = get_aom_prom_metrics_http(region, "", cpu_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
-        memory_result = get_aom_prom_metrics_http(region, "", memory_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
-        disk_result = get_aom_prom_metrics_http(region, "", disk_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+        cpu_result = get_aom_prom_metrics_http(region, aom_id, cpu_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+        memory_result = get_aom_prom_metrics_http(region, aom_id, memory_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+        disk_result = get_aom_prom_metrics_http(region, aom_id, disk_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
 
         metrics_result = {
             "cpu": cpu_result.get("result", {}).get("data", {}),
@@ -525,7 +527,7 @@ def get_node_metrics(node_ip: str, region: str, ak: str, sk: str,
         # 网络流量
         try:
             net_query = f'rate(node_network_receive_bytes_total{{instance="{node_ip}"}}[5m])'
-            net_result = get_aom_prom_metrics_http(region, "", net_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+            net_result = get_aom_prom_metrics_http(region, aom_id, net_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
             if net_result.get("success"):
                 metrics_result["network"] = net_result
         except Exception:
@@ -562,12 +564,12 @@ def get_service_chain(workload_name: str, namespace: str, region: str, cluster_i
                 chain["pods"].append({
                     "name": pod.get("name"),
                     "status": pod.get("status"),
-                    "node_ip": pod.get("host_ip"),
+                    "node_ip": pod.get("host_ip") or pod.get("node"),
                     "ip": pod.get("ip"),
                     "restarts": pod.get("restart_count", 0)
                 })
-                if pod.get("host_ip") and pod.get("host_ip") not in chain["nodes"]:
-                    chain["nodes"].append(pod.get("host_ip"))
+                if (pod.get("host_ip") or pod.get("node")) and (pod.get("host_ip") or pod.get("node")) not in chain["nodes"]:
+                    chain["nodes"].append(pod.get("host_ip") or pod.get("node"))
 
     # 获取Service
     services_result = get_kubernetes_services(region, cluster_id, ak, sk, project_id, namespace)
@@ -718,7 +720,7 @@ def analyze_chain_components(chain: Dict, region: str, ak: str, sk: str,
 
         # 分析节点
         for node_ip in chain.get("nodes", []):
-            node_metrics = get_node_metrics(node_ip, region, access_key, secret_key, proj_id)
+            node_metrics = get_node_metrics(node_ip, region, cluster_id, access_key, secret_key, proj_id)
             analysis["nodes"][node_ip] = node_metrics
 
         return {"success": True, "analysis": analysis}
@@ -1195,15 +1197,18 @@ def get_node_monitoring(node_ip: str, region: str, cluster_id: str, ak: str, sk:
         access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
         cluster_name = get_cluster_name(region, cluster_id, access_key, secret_key, proj_id)
 
+        aom_result = get_aom_instance(region, cluster_id, access_key, secret_key, proj_id)
+        aom_id = aom_result.get("aom_instance_id", "") if aom_result.get("success") else ""
+
         queries = {
-            "cpu": f'100 - (avg by (instance) (irate(node_cpu_seconds_total{{mode="idle",instance=~"{node_ip}:.*",cluster_name="{cluster_name}"}}[5m])) * 100)',
-            "memory": f'(1 - (node_memory_MemAvailable_bytes{{instance=~"{node_ip}:.*",cluster_name="{cluster_name}"}} / node_memory_MemTotal_bytes{{instance=~"{node_ip}:.*",cluster_name="{cluster_name}"}})) * 100',
-            "disk": f'(1 - (node_filesystem_avail_bytes{{mountpoint="/",instance=~"{node_ip}:.*",cluster_name="{cluster_name}"}} / node_filesystem_size_bytes{{mountpoint="/",instance=~"{node_ip}:.*",cluster_name="{cluster_name}"}})) * 100'
+            "cpu": f'100 - (avg by (instance) (irate(node_cpu_seconds_total{{mode="idle",instance="{node_ip}",cluster_name="{cluster_name}"}}[5m])) * 100)',
+            "memory": f'(1 - (node_memory_MemAvailable_bytes{{instance="{node_ip}",cluster_name="{cluster_name}"}} / node_memory_MemTotal_bytes{{instance="{node_ip}",cluster_name="{cluster_name}"}})) * 100',
+            "disk": f'(1 - (node_filesystem_avail_bytes{{mountpoint="/",instance="{node_ip}",cluster_name="{cluster_name}"}} / node_filesystem_size_bytes{{mountpoint="/",instance="{node_ip}",cluster_name="{cluster_name}"}})) * 100'
         }
 
         results = {}
         for key, query in queries.items():
-            r = get_aom_prom_metrics_http(region, "", query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+            r = get_aom_prom_metrics_http(region, aom_id, query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
             if r.get("success") and r.get("result", {}).get("data", {}).get("result"):
                 try:
                     latest = r["result"]["data"]["result"][0]["values"][-1][1]
@@ -1251,12 +1256,14 @@ def get_pods_resource_usage(node_ip: str, region: str, cluster_id: str,
     try:
         access_key, secret_key, proj_id = get_credentials_with_region(region, ak, sk, project_id)
         cluster_name = get_cluster_name(region, cluster_id, access_key, secret_key, proj_id)
+        aom_result = get_aom_instance(region, cluster_id, access_key, secret_key, proj_id)
+        aom_id = aom_result.get("aom_instance_id", "") if aom_result.get("success") else ""
 
-        cpu_query = f'sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{{instance=~"{node_ip}:.*",cluster_name="{cluster_name}"}}[5m])) * 100'
-        mem_query = f'sum by (pod, namespace) (container_memory_working_set_bytes{{instance=~"{node_ip}:.*",cluster_name="{cluster_name}"}}) / 1024 / 1024'
+        cpu_query = f'sum by (pod, namespace) (rate(container_cpu_usage_seconds_total{{instance="{node_ip}",cluster_name="{cluster_name}"}}[5m])) * 100'
+        mem_query = f'sum by (pod, namespace) (container_memory_working_set_bytes{{instance="{node_ip}",cluster_name="{cluster_name}"}}) / 1024 / 1024'
 
-        cpu_result = get_aom_prom_metrics_http(region, "", cpu_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
-        mem_result = get_aom_prom_metrics_http(region, "", mem_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+        cpu_result = get_aom_prom_metrics_http(region, aom_id, cpu_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
+        mem_result = get_aom_prom_metrics_http(region, aom_id, mem_query, hours=hours, ak=access_key, sk=secret_key, project_id=proj_id)
 
         pod_metrics = {}
 
@@ -1411,7 +1418,8 @@ def batch_node_diagnose(region: str, cluster_id: str, node_ips: List[str] = None
 
 def workload_diagnose(region: str, cluster_id: str, workload_name: str = None,
                      namespace: str = "default", ak: str = None, sk: str = None,
-                     project_id: str = None, fault_time: str = None) -> Dict[str, Any]:
+                     project_id: str = None, fault_time: str = None,
+                     hours: int = 6) -> Dict[str, Any]:
     """
     工作负载异常诊断主函数
 
@@ -1441,18 +1449,33 @@ def workload_diagnose(region: str, cluster_id: str, workload_name: str = None,
         "namespace": namespace,
         "fault_time": fault_time,
         "workloads": {},
+        "alarms": [],
+        "metrics_data": {},
+        "monitor_dashboard": None,
         "abnormal_pods": [],
         "node_diagnosis": {},
         "network_diagnosis": {},
         "change_correlation": {},
-        "alarms": [],
-        "operations": []
+        "operations": [],
+        "conclusions": [],
+        "recommendations": [],
+        "steps_completed": [],
+        "top3_root_causes": []
     }
 
     cluster_name = get_cluster_name(region, cluster_id, access_key, secret_key, project_id)
     diagnosis_data["cluster_name"] = cluster_name
 
-    # ===== 步骤1: 收集工作负载基础信息 =====
+    # ===== 步骤1: AOM 告警查询 =====
+    # 获取工作负载相关的告警，分析是否有资源、网络、系统等相关告警
+    # 不管告警是否恢复，都要去查询监控来判断是否有资源瓶颈
+    if workload_name and cluster_name:
+        alarms = get_workload_alarms(region, cluster_name, namespace, workload_name,
+                                     access_key, secret_key, project_id, hours=hours)
+        diagnosis_data["alarms"] = alarms
+    diagnosis_data["steps_completed"].append("1. AOM告警查询 - 获取工作负载相关告警，分析资源/网络/系统告警")
+
+    # ===== 步骤2: 收集工作负载信息 =====
     namespace_workloads = get_namespace_workloads(region, cluster_id, namespace, access_key, secret_key, project_id)
     diagnosis_data["workloads"] = namespace_workloads
 
@@ -1464,8 +1487,97 @@ def workload_diagnose(region: str, cluster_id: str, workload_name: str = None,
                 target_pods.append(pod)
     else:
         target_pods = namespace_workloads.get("pods", [])
+    diagnosis_data["steps_completed"].append("2. 收集工作负载信息 - 名称/namespace/副本数/Pod状态/异常比例")
 
-    # ===== 步骤2: 异常 Pod 诊断 =====
+    # ===== 步骤3: 收集监控数据 =====
+    # CPU/内存使用率、重启次数、事件日志等，绘制监控数据时序图
+    metrics_data = {}
+    monitor_dashboard_file = None
+    try:
+        from .chart_generator import generate_monitor_dashboard
+        dashboard_result = generate_monitor_dashboard(
+            region=region,
+            cluster_id=cluster_id,
+            ak=access_key, sk=secret_key, project_id=project_id,
+            namespace=namespace,
+            label_selector=f"app={workload_name}" if workload_name else None,
+            hours=hours,
+            title=f"{workload_name or namespace} 诊断监控",
+            output_file=f"/tmp/cce_diag_{cluster_id[:8]}_{workload_name or namespace}.html"
+        )
+        if dashboard_result.get("success"):
+            monitor_dashboard_file = dashboard_result.get("output_file")
+            metrics_data = {
+                "cpu_pods": dashboard_result.get("data_summary", {}).get("cpu_pods", 0),
+                "memory_pods": dashboard_result.get("data_summary", {}).get("memory_pods", 0),
+                "network_pods": dashboard_result.get("data_summary", {}).get("network_pods", 0),
+                "dashboard_file": monitor_dashboard_file,
+                "file_size_kb": dashboard_result.get("file_size_kb", 0),
+            }
+    except Exception as e:
+        metrics_data["error"] = str(e)
+
+    # 也用 cce_metrics 获取详细时序数据用于分析
+    try:
+        from .cce_metrics import get_cce_pod_metrics_topN
+        topn_result = get_cce_pod_metrics_topN(
+            region=region, cluster_id=cluster_id,
+            ak=access_key, sk=secret_key, project_id=project_id,
+            namespace=namespace,
+            label_selector=f"app={workload_name}" if workload_name else None,
+            top_n=10, hours=hours
+        )
+        if topn_result.get("success"):
+            cpu_series = topn_result.get("metrics", {}).get("cpu_top_n", [])
+            mem_series = topn_result.get("metrics", {}).get("memory_top_n", [])
+            # 分析 CPU/内存是否有异常趋势
+            for item in cpu_series:
+                ts = item.get("time_series", [])
+                if ts:
+                    vals = [float(t[1]) for t in ts]
+                    avg_cpu = sum(vals) / len(vals) if vals else 0
+                    max_cpu = max(vals) if vals else 0
+                    if avg_cpu > 80 or max_cpu > 95:
+                        diagnosis_data["recommendations"].append({
+                            "category": "CPU瓶颈",
+                            "issue": f"Pod {item.get('pod', '?')} CPU 平均={avg_cpu:.1f}%, 峰值={max_cpu:.1f}%",
+                            "suggestion": "建议扩容工作负载实例或增加CPU资源限制"
+                        })
+            for item in mem_series:
+                ts = item.get("time_series", [])
+                if ts:
+                    vals = [float(t[1]) for t in ts]
+                    avg_mem = sum(vals) / len(vals) if vals else 0
+                    max_mem = max(vals) if vals else 0
+                    if avg_mem > 80 or max_mem > 95:
+                        diagnosis_data["recommendations"].append({
+                            "category": "内存瓶颈",
+                            "issue": f"Pod {item.get('pod', '?')} 内存 平均={avg_mem:.1f}%, 峰值={max_mem:.1f}%",
+                            "suggestion": "建议增加内存限制或排查内存泄漏"
+                        })
+    except Exception:
+        pass
+
+    # 如果有告警，查询对应监控数据分析趋势
+    if diagnosis_data["alarms"]:
+        alarm_keywords = ["cpu", "memory", "内存", "流量", "network", "bandwidth"]
+        for alarm in diagnosis_data["alarms"]:
+            alarm_name = alarm.get("alarm_name", "").lower() + alarm.get("name", "").lower()
+            alarm_desc = alarm.get("alarm_description", "") + alarm.get("description", "")
+            for kw in alarm_keywords:
+                if kw in alarm_name or kw in alarm_desc.lower():
+                    diagnosis_data["recommendations"].append({
+                        "category": "告警关联监控",
+                        "issue": f"告警 '{alarm.get('alarm_name', alarm.get('name', ''))}' 触发，需关注{kw}相关指标是否有异常趋势",
+                        "suggestion": "已通过监控看板采集数据，请查看监控图表分析趋势"
+                    })
+                    break
+
+    diagnosis_data["metrics_data"] = metrics_data
+    diagnosis_data["monitor_dashboard"] = monitor_dashboard_file
+    diagnosis_data["steps_completed"].append("3. 收集监控数据 - CPU/内存使用率、重启次数、事件日志，绘制监控时序图")
+
+    # ===== 步骤4: 异常 Pod 诊断 =====
     abnormal_pods = []
     for pod in target_pods:
         analysis = analyze_pod_status(pod)
@@ -1479,10 +1591,14 @@ def workload_diagnose(region: str, cluster_id: str, workload_name: str = None,
             pod["events"] = events[-5:]
             abnormal_pods.append(pod)
 
-    diagnosis_data["abnormal_pods"] = abnormal_pods
+    # 最多取 3 个异常 Pod 做详细诊断
+    abnormal_pods_detailed = abnormal_pods[:3]
+    diagnosis_data["abnormal_pods"] = abnormal_pods_detailed
+    diagnosis_data["abnormal_pods_total"] = len(abnormal_pods)
+    diagnosis_data["steps_completed"].append("4. 异常Pod诊断 - 挑选最多3个异常Pod进行诊断")
 
-    # ===== 步骤3: 节点诊断 =====
-    all_nodes = list(set([p.get("node_ip") for p in target_pods if p.get("node_ip")]))
+    # ===== 步骤5: 节点诊断 =====
+    all_nodes = list(set([p.get("node_ip") or p.get("node") or p.get("host_ip") for p in target_pods if p.get("node_ip") or p.get("node") or p.get("host_ip")]))
     node_diagnosis_result = {"success": False, "abnormal_nodes": [], "summary": {}}
 
     if all_nodes:
@@ -1499,8 +1615,9 @@ def workload_diagnose(region: str, cluster_id: str, workload_name: str = None,
             node_diagnosis_result["note"] = str(e)
 
     diagnosis_data["node_diagnosis"] = node_diagnosis_result
+    diagnosis_data["steps_completed"].append("5. 节点诊断 - 分析工作负载所在节点状态")
 
-    # ===== 步骤4: 网络链路诊断 =====
+    # ===== 步骤6: 网络链路诊断 =====
     network_diagnosis_result = {"success": False, "chain": {}, "analysis": {}}
 
     if workload_name:
@@ -1516,8 +1633,9 @@ def workload_diagnose(region: str, cluster_id: str, workload_name: str = None,
             network_diagnosis_result["note"] = str(e)
 
     diagnosis_data["network_diagnosis"] = network_diagnosis_result
+    diagnosis_data["steps_completed"].append("6. 网络链路诊断 - 分析Service/Ingress/ELB/EIP链路")
 
-    # ===== 步骤5: 变更关联分析 =====
+    # ===== 步骤7: 变更关联分析 =====
     all_events = []
     events_result = get_kubernetes_events(region, cluster_id, access_key, secret_key, project_id, namespace, limit=500)
     if events_result.get("success") and events_result.get("events"):
@@ -1529,22 +1647,14 @@ def workload_diagnose(region: str, cluster_id: str, workload_name: str = None,
 
     change_correlation = analyze_change_correlation(diagnosis_data["workloads"], all_events, fault_time)
     diagnosis_data["change_correlation"] = change_correlation
-
-    # ===== 步骤6: 获取告警信息 =====
-    if workload_name and cluster_name:
-        alarms = get_workload_alarms(region, cluster_name, namespace, workload_name,
-                                     access_key, secret_key, project_id, hours=1)
-        diagnosis_data["alarms"] = alarms
+    diagnosis_data["steps_completed"].append("7. 变更关联分析 - 分析最近1小时内是否有相关配置变更或版本更新")
 
     # ===== 生成诊断报告 =====
     report = generate_diagnosis_report(diagnosis_data)
-    report["steps_completed"] = [
-        "1. 收集工作负载基础信息",
-        "2. 诊断异常 Pod 状态",
-        "3. 执行节点诊断",
-        "4. 执行网络链路诊断",
-        "5. 分析变更信息关联性"
-    ]
+
+    # Top3 根因分析
+    top3 = _analyze_top3_root_causes(diagnosis_data)
+    diagnosis_data["top3_root_causes"] = top3
 
     return {
         "success": True,
@@ -1553,8 +1663,87 @@ def workload_diagnose(region: str, cluster_id: str, workload_name: str = None,
     }
 
 
+def _analyze_top3_root_causes(diagnosis_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """分析 Top3 根因"""
+    causes = []
+
+    # 1. 检查告警
+    alarms = diagnosis_data.get("alarms", [])
+    if alarms:
+        alarm_names = [a.get("alarm_name", a.get("name", "未知")) for a in alarms[:3]]
+        causes.append({
+            "rank": 1,
+            "category": "AOM告警",
+            "cause": f"发现 {len(alarms)} 条告警: {', '.join(alarm_names)}",
+            "confidence": "high",
+            "evidence": f"告警数量: {len(alarms)}"
+        })
+
+    # 2. 检查异常 Pod
+    abnormal_count = diagnosis_data.get("abnormal_pods_total", len(diagnosis_data.get("abnormal_pods", [])))
+    if abnormal_count > 0:
+        abnormal_pods = diagnosis_data.get("abnormal_pods", [])
+        pod_details = [f"{p.get('name', '?')}({p.get('status', '?')})" for p in abnormal_pods[:3]]
+        causes.append({
+            "rank": 2,
+            "category": "Pod异常",
+            "cause": f"发现 {abnormal_count} 个异常 Pod: {', '.join(pod_details)}",
+            "confidence": "high",
+            "evidence": f"异常Pod占比: {abnormal_count}"
+        })
+
+    # 3. 检查资源瓶颈
+    recommendations = diagnosis_data.get("recommendations", [])
+    resource_issues = [r for r in recommendations if r.get("category") in ["CPU瓶颈", "内存瓶颈"]]
+    if resource_issues:
+        issues_desc = ", ".join(r.get("issue", "") for r in resource_issues[:2])
+        causes.append({
+            "rank": 3,
+            "category": "资源瓶颈",
+            "cause": issues_desc,
+            "confidence": "medium",
+            "evidence": f"资源异常项: {len(resource_issues)}"
+        })
+
+    # 4. 检查节点异常
+    node_diag = diagnosis_data.get("node_diagnosis", {})
+    abnormal_nodes = node_diag.get("abnormal_nodes", [])
+    if abnormal_nodes:
+        causes.append({
+            "rank": len(causes) + 1 if len(causes) < 3 else 3,
+            "category": "节点异常",
+            "cause": f"发现 {len(abnormal_nodes)} 个节点资源异常: {', '.join(abnormal_nodes[:3])}",
+            "confidence": "medium",
+            "evidence": f"异常节点: {abnormal_nodes}"
+        })
+
+    # 5. 检查变更关联
+    change_corr = diagnosis_data.get("change_correlation", {})
+    if change_corr.get("has_correlation"):
+        causes.append({
+            "rank": len(causes) + 1 if len(causes) < 3 else 3,
+            "category": "变更关联",
+            "cause": f"发现相关变更: {change_corr.get('analysis', '配置变更可能导致问题')}",
+            "confidence": "low",
+            "evidence": f"变更数量: {len(change_corr.get('changes', []))}"
+        })
+
+    # 如果没有发现问题
+    if not causes:
+        causes.append({
+            "rank": 1,
+            "category": "健康",
+            "cause": "工作负载状态正常，未发现异常根因",
+            "confidence": "high",
+            "evidence": "所有 Pod Running，无告警，资源正常"
+        })
+
+    return causes[:3]
+
+
 def workload_diagnose_by_alarm(region: str, cluster_id: str, alarm_info: str,
-                               ak: str = None, sk: str = None, project_id: str = None) -> Dict[str, Any]:
+                               ak: str = None, sk: str = None, project_id: str = None,
+                               hours: int = 6) -> Dict[str, Any]:
     """基于告警进行工作负载诊断"""
     import re
 
@@ -1587,7 +1776,7 @@ def workload_diagnose_by_alarm(region: str, cluster_id: str, alarm_info: str,
             workload_name = parts[0]
             namespace = parts[1] if len(parts) > 1 else "default"
 
-    return workload_diagnose(region, cluster_id, workload_name, namespace, ak, sk, project_id, fault_time)
+    return workload_diagnose(region, cluster_id, workload_name, namespace, ak, sk, project_id, fault_time, hours)
 
 
 def verify_workload_after_operation(region: str, cluster_id: str, workload_name: str,

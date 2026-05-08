@@ -758,3 +758,501 @@ def list_aom_current_alarms(region: str, ak: Optional[str] = None, sk: Optional[
             "error": str(e),
             "error_type": type(e).__name__
         }
+
+
+def list_aom_alarms(
+    region: str,
+    ak: Optional[str] = None,
+    sk: Optional[str] = None,
+    project_id: Optional[str] = None,
+    hours: int = 1,
+    event_severity: Optional[str] = None,
+    cluster_name: Optional[str] = None,
+    limit: int = 500,
+) -> Dict[str, Any]:
+    """查询所有告警（活跃 + 历史），合并去重后返回。
+
+    核心原则：查告警必须同时看「正在触发的」和「已恢复的」，因为：
+    - 资源类告警（CPU/内存/磁盘）往往持续时间短，查的时候可能已恢复
+    - 压测、突发流量等场景下告警恢复快，只看 active 会漏掉关键事件
+    - 已恢复的告警仍然有价值：说明曾经出现过异常，需要关注
+
+    Args:
+        region: 华为云区域
+        ak/sk/project_id: 认证信息
+        hours: 查询时间范围(小时)
+        event_severity: 严重级别过滤 (Critical/Major/Minor/Info)
+        cluster_name: 集群名称过滤(可选)
+        limit: 每种类型的最大返回条数
+
+    Returns:
+        Dict with combined events, stats, and per-type summary
+    """
+    from datetime import datetime, timezone, timedelta
+    import re
+
+    time_range_minutes = hours * 60
+    time_range_str = f"-1.-1.{time_range_minutes}"
+    tz8 = timezone(timedelta(hours=8))
+
+    # 1) 查询活跃告警
+    active_result = list_aom_current_alarms(
+        region=region, ak=ak, sk=sk, project_id=project_id,
+        event_type='active_alert',
+        event_severity=event_severity,
+        time_range=time_range_str,
+        limit=limit,
+    )
+    active_events = active_result.get('events', []) if active_result.get('success') else []
+
+    # 2) 查询历史告警
+    history_result = list_aom_current_alarms(
+        region=region, ak=ak, sk=sk, project_id=project_id,
+        event_type='history_alert',
+        event_severity=event_severity,
+        time_range=time_range_str,
+        limit=limit,
+    )
+    history_events = history_result.get('events', []) if history_result.get('success') else []
+
+    # 3) 合并去重（按 event_sn 去重）
+    seen_sns = set()
+    all_events = []
+    for e in active_events + history_events:
+        sn = e.get('event_sn')
+        if sn and sn in seen_sns:
+            continue
+        if sn:
+            seen_sns.add(sn)
+        all_events.append(e)
+
+    # 4) 按集群名称过滤
+    if cluster_name:
+        all_events = [
+            e for e in all_events
+            if e.get('cluster_name') == cluster_name
+            or cluster_name in e.get('cluster_alias_name', '')
+        ]
+
+    # 5) 统计分析
+    firing_count = sum(1 for e in all_events if e.get('status') == 'firing')
+    resolved_count = sum(1 for e in all_events if e.get('status') == 'resolved')
+
+    # 按告警类型分组统计
+    type_stats = {}
+    for e in all_events:
+        name = e.get('event_name', 'Unknown')
+        if name not in type_stats:
+            type_stats[name] = {'count': 0, 'firing': 0, 'resolved': 0}
+        type_stats[name]['count'] += 1
+        if e.get('status') == 'firing':
+            type_stats[name]['firing'] += 1
+        else:
+            type_stats[name]['resolved'] += 1
+
+    # 按严重级别统计
+    severity_stats = {}
+    for e in all_events:
+        sev = e.get('event_severity', 'Unknown')
+        severity_stats[sev] = severity_stats.get(sev, 0) + 1
+
+    # 6) 生成可读摘要
+    lines = []
+    lines.append(f'📊 告警查询报告 (近 {hours} 小时, 活跃+历史)')
+    lines.append(f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+    lines.append(f'活跃告警: {firing_count} 条 | 已恢复: {resolved_count} 条 | 合并去重后: {len(all_events)} 条')
+    lines.append('')
+
+    if type_stats:
+        lines.append('按类型统计:')
+        sorted_types = sorted(type_stats.items(), key=lambda x: x[1]['count'], reverse=True)
+        for name, stats in sorted_types:
+            status_str = f"🔴{stats['firing']}条触发中" if stats['firing'] > 0 else f"✅{stats['resolved']}条已恢复"
+            lines.append(f'  {name}: {stats["count"]}条 ({status_str})')
+        lines.append('')
+
+    # 突出显示资源类告警 (CPU/内存/磁盘 等)
+    resource_alarms = [e for e in all_events if any(
+        kw in (e.get('event_name', '') + ' ' + e.get('message', ''))
+        for kw in ['CPU', 'cpu', 'Memory', 'memory', '内存', '磁盘', 'Disk', 'OOM', 'oom', 'Pressure', 'pressure']
+    )]
+    if resource_alarms:
+        lines.append(f'⚠️ 资源相关告警 ({len(resource_alarms)} 条) — 重点关注!')
+        lines.append('─' * 40)
+        for e in sorted(resource_alarms, key=lambda x: x.get('starts_at', 0), reverse=True)[:10]:
+            ts = datetime.fromtimestamp(e['starts_at']/1000, tz=tz8).strftime('%H:%M:%S') if e.get('starts_at') else '?'
+            status = '🔴触发中' if e.get('status') == 'firing' else '✅已恢复'
+            lines.append(f'  [{ts}] {e.get("event_name", "")} {status}')
+            msg = e.get('message', '')[:120]
+            if msg:
+                lines.append(f'    {msg}')
+        lines.append('')
+
+    report = '\n'.join(lines)
+
+    return {
+        'success': True,
+        'region': region,
+        'action': 'list_aom_alarms',
+        'hours': hours,
+        'total_count': len(all_events),
+        'firing_count': firing_count,
+        'resolved_count': resolved_count,
+        'active_count': len(active_events),
+        'history_count': len(history_events),
+        'type_stats': type_stats,
+        'severity_stats': severity_stats,
+        'events': all_events,
+        'report': report,
+        'message': f'查询完成: {len(all_events)}条告警(活跃{firing_count}+已恢复{resolved_count}), {len(type_stats)}种类型',
+    }
+
+
+def analyze_aom_alarms(
+    region: str,
+    ak: Optional[str] = None,
+    sk: Optional[str] = None,
+    project_id: Optional[str] = None,
+    cluster_name: Optional[str] = None,
+    hours: int = 1,
+    chronic_threshold: int = 5,
+    sudden_window_minutes: int = 10,
+) -> Dict[str, Any]:
+    """智能告警过滤分析 — 区分突发告警与常态告警，标注优先级。
+
+    策略:
+      - 常态告警 (chronic): 同一告警类型+同一资源在时间段内反复出现 >= chronic_threshold 次，
+        或命中已知常态模式(Pending/FailedScheduling/NotTriggerScaleUp 等) → 🟢 低优先级
+      - 突发告警 (sudden): 首次出现或近期突然新增，且不在常态模式中 → 🔴 高优先级
+      - 关注告警 (attention): 反复出现但可能重要的告警(如CPU/内存/磁盘相关) → 🟡 中优先级
+
+    Args:
+        region: 华为云区域
+        ak/sk/project_id: 认证信息
+        cluster_name: 集群名称过滤(可选)
+        hours: 查询时间范围(小时)
+        chronic_threshold: 同一告警在时间窗口内重复出现次数>=此值才视为常态
+        sudden_window_minutes: 突发告警判定窗口(分钟)，仅在此窗口内首次出现的告警视为突发
+
+    Returns:
+        Dict with grouped alarms, priority tags, summary stats
+    """
+    from datetime import datetime, timezone, timedelta
+    import re
+
+    # 1) Fetch ALL alarms (active + history) — 活跃和已恢复的告警都要看
+    result = list_aom_alarms(
+        region=region, ak=ak, sk=sk, project_id=project_id,
+        hours=hours, cluster_name=cluster_name,
+    )
+    if not result.get('success'):
+        return {'success': False, 'error': f'获取告警失败: {result.get("error", "")}'}
+
+    all_alarms = result.get('events', [])
+    if not all_alarms:
+        return {
+            'success': True, 'total_alarms': 0,
+            'sudden_alarms': [], 'attention_alarms': [], 'chronic_alarms': [],
+            'summary': {'total': 0, 'sudden': 0, 'attention': 0, 'chronic': 0},
+            'message': f'近{hours}小时无告警（活跃+历史均无）',
+        }
+
+    # Cluster filter already applied in list_aom_alarms if cluster_name is set
+
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    sudden_window_ms = sudden_window_minutes * 60 * 1000
+
+    # 2) Known chronic patterns — alarm names that are typically low-priority noise
+    CHRONIC_PATTERNS = [
+        'NotTriggerScaleUp', '未触发节点扩容',
+        'FailedScheduling', '调度失败',
+        'Unhealthy', '不健康',
+        'NodeNotReady', '节点未就绪',
+    ]
+
+    # 3) Resource-related keywords — these should get attention even if recurring
+    RESOURCE_KEYWORDS = [
+        'CPU', 'cpu', 'Memory', 'memory', '内存', '磁盘', 'Disk', 'disk',
+        'OOM', 'oom', 'Evicted', 'evicted', '驱赶',
+        'CrashLoopBackOff', 'crashloopbackoff',
+        'Pressure', 'pressure', '压力',
+        'NetworkUnavailable', 'network-unavailable',
+    ]
+
+    # 4) Group alarms by (event_name, resource_key) for dedup & frequency analysis
+    #    resource_key = namespace + pod_name or resource_id (shortened)
+    groups: Dict[str, Dict] = {}
+
+    for alarm in all_alarms:
+        event_name = alarm.get('event_name', 'Unknown')
+        namespace = alarm.get('namespace', '')
+        pod_name = alarm.get('pod_name', '')
+        resource_id = alarm.get('resource_id', '')
+
+        # Build a dedup key: event_name + resource identity
+        if pod_name:
+            # Strip deployment hash suffix for grouping (nginx-56fbbc86f-2btqn → nginx-*)
+            base_pod = re.sub(r'-[a-z0-9]{5,10}$', '', pod_name)
+            resource_key = f'{namespace}/{base_pod}'
+        else:
+            # Fallback: use first 80 chars of resource_id
+            resource_key = resource_id[:80]
+
+        group_key = f'{event_name}||{resource_key}'
+
+        if group_key not in groups:
+            groups[group_key] = {
+                'event_name': event_name,
+                'resource_key': resource_key,
+                'namespace': namespace,
+                'pod_name': pod_name,
+                'pods': set(),
+                'sample_alarm': alarm,
+                'count': 0,
+                'first_seen_ms': now_ms,
+                'last_seen_ms': 0,
+                'severity': alarm.get('event_severity', 'Major'),
+                'messages': set(),
+            }
+
+        g = groups[group_key]
+        g['count'] += 1
+        if pod_name:
+            g['pods'].add(pod_name)
+        starts = alarm.get('starts_at', 0)
+        if starts and starts < g['first_seen_ms']:
+            g['first_seen_ms'] = starts
+        if starts and starts > g['last_seen_ms']:
+            g['last_seen_ms'] = starts
+        msg = alarm.get('message', '')[:200]
+        if msg:
+            g['messages'].add(msg)
+
+    # 5) Classify each group
+    sudden_alarms = []
+    attention_alarms = []
+    chronic_alarms = []
+
+    for gk, g in groups.items():
+        event_name = g['event_name']
+        count = g['count']
+        first_seen = g['first_seen_ms']
+        severity = g['severity']
+
+        # Time since first alarm in this group
+        time_span_ms = now_ms - first_seen if first_seen else 0
+        is_recently_started = (now_ms - first_seen) < sudden_window_ms if first_seen else False
+
+        # Check if alarm matches known chronic pattern
+        is_chronic_pattern = any(p in event_name for p in CHRONIC_PATTERNS)
+
+        # Check if alarm has resource keywords
+        has_resource_keyword = any(kw in event_name or any(kw in m for m in g['messages'])
+                                    for kw in RESOURCE_KEYWORDS)
+
+        # Determine priority
+        if is_chronic_pattern and count >= chronic_threshold and not has_resource_keyword:
+            # Classic chronic: known noise pattern, repeated many times
+            priority = 'chronic'
+            priority_label = '🟢 常态'
+            reason = f'已知常态模式({event_name})在{hours}h内重复{count}次'
+        elif is_chronic_pattern and count >= chronic_threshold and has_resource_keyword:
+            # Chronic pattern BUT has resource keywords — needs attention
+            priority = 'attention'
+            priority_label = '🟡 关注'
+            reason = f'虽为常见模式但涉及资源指标({event_name})，重复{count}次'
+        elif is_recently_started and count <= 3:
+            # Just appeared, few occurrences — sudden
+            priority = 'sudden'
+            priority_label = '🔴 突发'
+            reason = f'近{sudden_window_minutes}分钟内首次出现，当前{count}次'
+        elif has_resource_keyword and count <= chronic_threshold:
+            # Resource-related but not yet chronic → attention/sudden
+            priority = 'sudden'
+            priority_label = '🔴 突发'
+            reason = f'涉及资源指标(CPU/内存/磁盘)且出现次数较少({count}次)'
+        elif has_resource_keyword:
+            priority = 'attention'
+            priority_label = '🟡 关注'
+            reason = f'涉及资源指标，重复{count}次需持续关注'
+        elif is_recently_started:
+            priority = 'sudden'
+            priority_label = '🔴 突发'
+            reason = f'近{sudden_window_minutes}分钟内新增，当前{count}次'
+        elif is_chronic_pattern:
+            priority = 'chronic'
+            priority_label = '🟢 常态'
+            reason = f'已知常态模式({event_name})'
+        elif count >= chronic_threshold:
+            priority = 'chronic'
+            priority_label = '🟢 常态'
+            reason = f'重复{count}次，属于持续性问题'
+        else:
+            priority = 'attention'
+            priority_label = '🟡 关注'
+            reason = f'出现{count}次，需要关注'
+
+        # Build alarm entry
+        entry = {
+            'priority': priority,
+            'priority_label': priority_label,
+            'event_name': event_name,
+            'namespace': g['namespace'],
+            'pods': sorted(g['pods']),
+            'pod_count': len(g['pods']),
+            'alarm_count': count,
+            'severity': severity,
+            'first_seen': datetime.fromtimestamp(g['first_seen_ms'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC') if g['first_seen_ms'] else '-',
+            'last_seen': datetime.fromtimestamp(g['last_seen_ms'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC') if g['last_seen_ms'] else '-',
+            'sample_message': list(g['messages'])[0] if g['messages'] else '-',
+            'reason': reason,
+        }
+
+        if priority == 'sudden':
+            sudden_alarms.append(entry)
+        elif priority == 'attention':
+            attention_alarms.append(entry)
+        else:
+            chronic_alarms.append(entry)
+
+    # 5.5) Cross-group correlation: if a Pod/resource has chronic alarms,
+    #       its other alarm types should also be marked chronic (same root cause)
+    chronic_resources = set()
+    for a in chronic_alarms:
+        # Build resource identity from namespace + pods
+        for pod in a.get('pods', []):
+            # Strip deployment hash to get base deployment name
+            base_pod = re.sub(r'-[a-z0-9]{5,10}$', '', pod)
+            chronic_resources.add(f'{a["namespace"]}/{base_pod}')
+        if not a.get('pods') and a.get('resource_key'):
+            chronic_resources.add(a['resource_key'])
+
+    # Check sudden/attention alarms — if same resource as chronic, downgrade
+    demoted_from_sudden = []
+    demoted_from_attention = []
+    remaining_sudden = []
+    remaining_attention = []
+
+    for a in sudden_alarms:
+        is_related = False
+        for pod in a.get('pods', []):
+            base_pod = re.sub(r'-[a-z0-9]{5,10}$', '', pod)
+            if f'{a["namespace"]}/{base_pod}' in chronic_resources:
+                is_related = True
+                break
+        if not is_related and a.get('resource_key') in chronic_resources:
+            is_related = True
+
+        if is_related and not any(kw in a['event_name'] or any(kw in (a.get('sample_message','')) for kw in RESOURCE_KEYWORDS) for kw in RESOURCE_KEYWORDS):
+            a['priority'] = 'chronic'
+            a['priority_label'] = '🟢 常态'
+            a['reason'] = f'与常态告警同源(Pod: {", ".join(a["pods"][:2])})，根因相同，降级'
+            demoted_from_sudden.append(a)
+        else:
+            remaining_sudden.append(a)
+
+    for a in attention_alarms:
+        is_related = False
+        for pod in a.get('pods', []):
+            base_pod = re.sub(r'-[a-z0-9]{5,10}$', '', pod)
+            if f'{a["namespace"]}/{base_pod}' in chronic_resources:
+                is_related = True
+                break
+        if is_related and not any(kw in a['event_name'] or any(kw in (a.get('sample_message','')) for kw in RESOURCE_KEYWORDS) for kw in RESOURCE_KEYWORDS):
+            a['priority'] = 'chronic'
+            a['priority_label'] = '🟢 常态'
+            a['reason'] = f'与常态告警同源(Pod: {", ".join(a["pods"][:2])})，根因相同，降级'
+            demoted_from_attention.append(a)
+        else:
+            remaining_attention.append(a)
+
+    sudden_alarms = remaining_sudden
+    attention_alarms = remaining_attention
+    chronic_alarms = chronic_alarms + demoted_from_sudden + demoted_from_attention
+
+    # Sort each list by alarm_count desc
+    sudden_alarms.sort(key=lambda x: x['alarm_count'], reverse=True)
+    attention_alarms.sort(key=lambda x: x['alarm_count'], reverse=True)
+    chronic_alarms.sort(key=lambda x: x['alarm_count'], reverse=True)
+
+    # 6) Build summary
+    total = len(all_alarms)
+    unique_groups = len(groups)
+    summary = {
+        'total_raw_alarms': total,
+        'unique_alarm_groups': unique_groups,
+        'sudden_count': len(sudden_alarms),
+        'attention_count': len(attention_alarms),
+        'chronic_count': len(chronic_alarms),
+        'sudden_alarm_raw_count': sum(a['alarm_count'] for a in sudden_alarms),
+        'attention_alarm_raw_count': sum(a['alarm_count'] for a in attention_alarms),
+        'chronic_alarm_raw_count': sum(a['alarm_count'] for a in chronic_alarms),
+        'noise_reduction_pct': round(
+            sum(a['alarm_count'] for a in chronic_alarms) / total * 100, 1
+        ) if total > 0 else 0,
+    }
+
+    # 7) Build text report for quick reading
+    lines = []
+    lines.append(f'📊 告警过滤分析报告 (近 {hours} 小时)')
+    lines.append(f'━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+    lines.append(f'原始告警: {total} 条 → 去重后: {unique_groups} 组')
+    lines.append(f'噪音削减: {summary["noise_reduction_pct"]}% 的告警为常态重复')
+    lines.append('')
+
+    if sudden_alarms:
+        lines.append(f'🔴 突发告警 ({len(sudden_alarms)} 组) — 重点关注!')
+        lines.append('─' * 40)
+        for a in sudden_alarms:
+            pods_str = ', '.join(a['pods'][:3]) + ('...' if len(a['pods']) > 3 else '')
+            lines.append(f'  [{a["severity"]}] {a["event_name"]}')
+            lines.append(f'    命名空间: {a["namespace"]} | Pod: {pods_str}')
+            lines.append(f'    次数: {a["alarm_count"]} | {a["reason"]}')
+            if a['sample_message'] != '-':
+                lines.append(f'    消息: {a["sample_message"][:120]}')
+            lines.append('')
+    else:
+        lines.append('🔴 突发告警: 无 ✅')
+        lines.append('')
+
+    if attention_alarms:
+        lines.append(f'🟡 关注告警 ({len(attention_alarms)} 组)')
+        lines.append('─' * 40)
+        for a in attention_alarms:
+            pods_str = ', '.join(a['pods'][:3]) + ('...' if len(a['pods']) > 3 else '')
+            lines.append(f'  [{a["severity"]}] {a["event_name"]}')
+            lines.append(f'    命名空间: {a["namespace"]} | Pod: {pods_str}')
+            lines.append(f'    次数: {a["alarm_count"]} | {a["reason"]}')
+            lines.append('')
+    else:
+        lines.append('🟡 关注告警: 无')
+        lines.append('')
+
+    if chronic_alarms:
+        lines.append(f'🟢 常态告警 ({len(chronic_alarms)} 组) — 低优先级')
+        lines.append('─' * 40)
+        for a in chronic_alarms:
+            pods_str = ', '.join(a['pods'][:3]) + ('...' if len(a['pods']) > 3 else '')
+            lines.append(f'  [{a["severity"]}] {a["event_name"]}')
+            lines.append(f'    命名空间: {a["namespace"]} | Pod: {pods_str}')
+            lines.append(f'    次数: {a["alarm_count"]} | {a["reason"]}')
+            lines.append('')
+    else:
+        lines.append('🟢 常态告警: 无')
+        lines.append('')
+
+    report = '\n'.join(lines)
+
+    return {
+        'success': True,
+        'region': region,
+        'hours': hours,
+        'chronic_threshold': chronic_threshold,
+        'sudden_window_minutes': sudden_window_minutes,
+        'summary': summary,
+        'sudden_alarms': sudden_alarms,
+        'attention_alarms': attention_alarms,
+        'chronic_alarms': chronic_alarms,
+        'report': report,
+        'message': f'告警过滤完成: {total}条原始告警 → {summary["sudden_count"]}突发 + {summary["attention_count"]}关注 + {summary["chronic_count"]}常态 (噪音削减{summary["noise_reduction_pct"]}%)',
+    }

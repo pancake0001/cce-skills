@@ -240,6 +240,9 @@ pip install huaweicloudsdkcore huaweicloudsdkecs huaweicloudsdkvpc huaweicloudsd
 | `huawei_get_cce_pod_metrics` | 获取指定Pod的CPU/内存使用率时序监控数据 |
 | `huawei_get_cce_node_metrics_topN` | 获取节点 CPU/内存/磁盘使用率 Top N |
 | `huawei_get_cce_node_metrics` | 获取指定节点的CPU/内存/磁盘使用率时序监控数据 |
+| `huawei_generate_monitor_dashboard` | ⭐ 生成监控HTML看板（CPU/内存/网络流量图表，Chart.js内联，无需外部CDN） |
+| `huawei_generate_diagnosis_report` | ⭐ 生成完整7步诊断HTML报告（AOM告警+工作负载+监控图表+异常Pod+节点+网络+变更，Chart.js内嵌） |
+| `huawei_analyze_aom_alarms` | ⭐ 智能告警过滤分析（去重+突发/关注/常态三级分类+同源关联降级，噪音削减90%+） |
 
 #### 集群日志查询
 
@@ -282,7 +285,56 @@ python3 huawei-cloud.py huawei_get_pod_logs \
   previous=true
 ```
 
-#### 集群巡检
+#### ⭐ 自动巡检（快检+诊断分离，推荐 cron 使用）
+
+| 工具 | 耗时 | 功能 |
+|------|------|------|
+| `huawei_cce_quick_check` ⭐ | **<10s** | 快速巡检：3 个 API（告警+CPU TopN+ELB），判断有无异常 |
+| `huawei_cce_deep_diagnosis` | 60~120s | 深度诊断：6+ 个 API，全链路诊断+根因定位+恢复方案 |
+| `huawei_cce_auto_inspection` ⭐ | <10s(正常) / 120s(异常) | 一步到位：快检→无异常返回OK / 有异常自动深诊 |
+
+**架构设计：**
+```
+Cron 每5min → huawei_cce_auto_inspection (<10s)
+  ├─ 无异常 → HEARTBEAT_OK，结束
+  └─ 有异常 → 自动深诊(6+ API) → 根因+恢复方案
+              → 发邮件 + 推送诊断结论
+```
+
+**异常判断阈值（可自定义）：**
+- CPU 告警 > 80%（不管是否恢复）
+- 业务 Pod CPU 平均 > 60%
+- ELB 最近 5min QPS > 1500
+- ELB 最近 5min P99 > 100ms
+- 可用副本 ≠ 期望副本
+- Pod CrashLoopBackOff
+
+**快检 vs 深诊对比：**
+| | 快检 | 深诊 |
+|---|---|---|
+| API 调用数 | 3 | 6+ |
+| 耗时 | <10s | 60~120s |
+| 适用场景 | Cron 高频巡检 | 异常后深入分析 |
+| 返回内容 | 有/无异常 + 基础指标 | 根因 + 恢复方案 |
+| cron 超时建议 | 60s | 300s |
+
+**自定义阈值示例：**
+```bash
+# 调整 CPU 阈值为 70%，ELB QPS 阈值为 2000
+python3 huawei-cloud.py huawei_cce_quick_check \
+  region=cn-north-4 cluster_id=xxx \
+  thresholds='{"pod_cpu_avg_percent": 70, "elb_qps": 2000}'
+```
+
+**cron 配置最佳实践：**
+- Cron 调用 `huawei_cce_auto_inspection`，超时 120s
+- 无异常时 <10s 返回，不浪费资源
+- 有异常时自动执行深诊，agent 生成 HTML 报告 + 发邮件
+- 不要用 `huawei_cce_deep_diagnosis` 做高频巡检（太慢）
+
+---
+
+#### 集群巡检（完整版，耗时较长）
 
 | 工具 | 模式 | 功能 |
 |------|------|------|
@@ -302,7 +354,7 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 | `huawei_node_resource_inspection` | 节点资源使用率巡检 |
 | `huawei_node_vul_inspection` | 节点漏洞巡检（含OS版本、内核版本、未处理漏洞数） |
 | `huawei_event_inspection` | 集群关键事件巡检 |
-| `huawei_aom_alarm_inspection` | AOM活跃告警巡检 |
+| `huawei_aom_alarm_inspection` | AOM告警巡检(活跃+历史) |
 | `huawei_elb_monitoring_inspection` | ELB负载均衡监控巡检 |
 
 #### 网络问题诊断
@@ -341,7 +393,7 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 | `huawei_workload_diagnose_by_alarm` | 基于告警的工作负载诊断 | 触发告警的工作负载 |
 
 **诊断流程(近1小时数据)：**
-1.  **AOM告警查询** - 获取工作负载相关的告警，分析是否有资源、网络、系统等相关告警，使用huawei_list_aom_alarms，尤其要关注CPU,内存，流量相关的告警信息，注意，这些告警不管他是否恢复，都要去查询监控来判断是否有资源瓶颈，内存的告警也是一样的道理，流量相关的告警也是一样的道理，如果有相关告警，不管他是否恢复了，都要去查询监控数据来分析是否有资源瓶颈或者异常趋势。
+1.  **AOM告警查询** - 使用 `huawei_list_aom_alarms` 获取工作负载相关的告警（**必须同时查活跃+历史**，因为资源类告警往往已恢复但仍需关注），分析是否有资源、网络、系统等相关告警。尤其要关注CPU、内存、流量相关的告警信息。**关键原则**：不管告警是否恢复，都要去查询监控数据来判断是否有资源瓶颈——已恢复的CPU告警不等于没有资源问题，可能只是负载暂时下降。
 2. **收集工作负载信息** - 工作负载名称、namespace、副本数、Pod状态、异常比例
 3. **收集监控数据** - CPU/内存使用率、重启次数、事件日志等，可以使用huawei_get_cce_pod_metrics及huawei_get_cce_pod_metrics_topN工具获取监控数据，获取监控数据后，绘制出监控数据的时序图，分析是否有资源瓶颈或异常趋势
 4. **异常Pod诊断** - 挑选最多3个异常Pod进行诊断，参考CCE_Workload_Troubleshooting_Guide.md
@@ -362,6 +414,20 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 - 变更关联分析
 - Top3根因分析
 - 恢复建议，如用户同意可直接调用相关工具进行恢复
+
+**一键生成诊断报告：**
+使用 `huawei_generate_diagnosis_report` 可一键完成7步诊断并生成完整 HTML 报告，监控图表直接内嵌，无需跳转。输出自包含 HTML 文件，Chart.js 全内联，国内无需 CDN。
+
+```python
+from huawei_cloud.chart_generator import generate_diagnosis_report
+result = generate_diagnosis_report(
+    region='cn-north-4',
+    cluster_id='034b98c7-1c4d-11f1-842d-0255ac100249',
+    workload_name='nginx',
+    namespace='default',
+)
+print(result['output_file'])  # /tmp/cce_diag_report_xxxx_nginx.html
+```
 
 **参考文档：**
 - [CCE工作负载异常排查指南](./references/CCE_Workload_Troubleshooting_Guide.md)
@@ -409,8 +475,9 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 
 | 工具 | 功能 | 说明 |
 |------|------|------|
-| `huawei_list_aom_alarms` | 查询所有告警 (活跃+历史) | ⭐ 推荐：默认查询最近1小时所有告警，支持 `hours` 参数 |
-| `huawei_list_aom_current_alarms` | 查询当前活跃告警 | 需指定 `event_type` 参数 |
+| `huawei_list_aom_alarms` | ⭐ 查询所有告警(活跃+历史合并去重) | **推荐首选**：默认查近1小时，同时查 active+history，不会漏掉已恢复的告警 |
+| `huawei_list_aom_current_alarms` | 查询当前活跃/历史告警(单类型) | 需指定 `event_type=active_alert` 或 `history_alert`，一般用 `huawei_list_aom_alarms` 替代 |
+| `huawei_analyze_aom_alarms` | ⭐ 智能告警过滤分析(去重+突发/关注/常态三级分类+同源关联降级) | **已优化**：现在同时查活跃+历史告警，不会漏掉已恢复的CPU/内存等资源告警 |
 | `huawei_list_aom_alerts` | 查询AOM告警列表 | 查询告警规则触发记录 |
 | `huawei_list_aom_alarm_rules` | 查询AOM告警规则列表 | 阈值/事件告警规则 |
 | `huawei_list_aom_action_rules` | 查询AOM动作规则列表 | 告警通知规则 |
@@ -418,7 +485,7 @@ python3 huawei-cloud.py huawei_get_pod_logs \
 | `huawei_list_aom_instances` | 查询AOM实例列表 | Prometheus实例 |
 | `huawei_get_aom_metrics` | 使用PromQL查询AOM监控指标 | 自定义PromQL查询 |
 | `huawei_query_aom_logs` | 按命名空间/Pod过滤查询AOM应用日志 | 应用日志 |
-| `huawei_aom_alarm_inspection` | AOM活跃告警巡检 | 集群巡检 |
+| `huawei_aom_alarm_inspection` | AOM告警巡检(活跃+历史) | 集群巡检 |
 
 ---
 
@@ -554,6 +621,46 @@ python3 huawei-cloud.py huawei_get_project_by_region region=cn-north-4
 > 官方 8 种漏洞状态：`unfix` / `ignored` / `verified` / `fixing` / `fixed` / `reboot` / `failed` / `fix_after_reboot`。
 > ⚠️ 节点漏洞修复详细指南见 [CCE_NODE_VUL_FIX.md](./references/CCE_NODE_VUL_FIX.md)，包含完整工作流和踩坑记录。
 
+
+## 🚨 告警查询最佳实践
+
+### 核心原则：查告警必须同时看「正在触发的」和「已恢复的」
+
+**血泪教训**：只查 active_alert 会漏掉已恢复的关键告警。资源类告警（CPU/内存/磁盘）往往持续时间短（1-5分钟），查的时候可能已经恢复。压测、突发流量等场景下，告警恢复特别快，只看 active 的话关键事件完全看不到。
+
+### 工具选择
+
+| 场景 | 推荐工具 | 说明 |
+|------|---------|------|
+| **日常告警查询** | `huawei_list_aom_alarms` | 同时查 active+history，合并去重，带资源类告警高亮 |
+| **告警噪音过滤** | `huawei_analyze_aom_alarms` | 智能三级分类(突发🔴/关注🟡/常态🟢)，现在也同时查活跃+历史 |
+| **只要当前触发的** | `huawei_list_aom_current_alarms` + `event_type=active_alert` | 限定场景使用 |
+| **只要历史记录** | `huawei_list_aom_current_alarms` + `event_type=history_alert` | 限定场景使用 |
+
+### 查询时机
+
+1. **做完影响性操作后**（压测、变更、扩缩容）→ 必须查告警看是否触发了什么
+2. **用户反映某个时间点的异常** → 用 `hours` 参数覆盖那个时间段，不能只看当前
+3. **日常巡检** → 用 `huawei_analyze_aom_alarms` 一键过滤，突出突发和关注类告警
+
+### 常见错误
+
+❌ **只查 active_alert** → 漏掉已恢复的 CPU 告警（历史上发生过）
+❌ **被大量重复告警淹没** → 100条都是同一种 Pending Pod 告警，就以为"只有这一种"
+❌ **不做分类统计** → 原始数据量大，必须按类型分组统计才能发现"少数派"告警
+❌ **不用 skill 脚本而手写 Python 查告警** → 容易搞错 API 和状态值，必须通过 skill 脚本调用
+❌ **告警规则状态值搞错** → AOM 告警规则 API 的 `alarm_rule_status` 取值是 `alarm`/`OK`/`Effective`，不是 `firing`！而事件告警 API 的 status 才是 `firing`/`resolved`，两者完全不同
+❌ **有 AOM 监控不用，去折腾 kubectl top / metrics-server** → AOM 的 `huawei_get_aom_metrics` 就是现成的监控数据源，优先用 AOM 查 CPU/内存使用率
+
+### 正确姿势
+
+✅ **查告警 = active + history**（用 `huawei_list_aom_alarms`）
+✅ **先看类型统计，再钻细节**（不要一条条翻原始数据）
+✅ **重点关注资源类告警**（CPU/内存/磁盘/OOM/Pressure），不管是否恢复
+✅ **做完变更后主动查**，而不是等用户提醒
+✅ **查监控优先用 AOM**（`huawei_get_aom_metrics`），不要先去折腾 metrics-server
+✅ **查告警必须走 skill 脚本**（`huawei_list_aom_alarms` / `huawei_analyze_aom_alarms`），不要手写 Python 调 SDK
+✅ **告警规则状态值是 `alarm`（不是 `firing`）** — 不同的 API 用不同的状态字段，别搞混
 
 ## Notes
 - Ensure your AK/SK has proper IAM permissions for the requested resources

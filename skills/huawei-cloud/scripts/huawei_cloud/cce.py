@@ -1601,6 +1601,266 @@ def scale_cce_workload(region: str, cluster_id: str, workload_type: str, name: s
             "error_type": type(e).__name__
         }
 
+def resize_cce_workload(region: str, cluster_id: str, workload_type: str, name: str, namespace: str,
+                       replicas: Optional[int] = None,
+                       cpu_limit: Optional[str] = None, memory_limit: Optional[str] = None,
+                       cpu_request: Optional[str] = None, memory_request: Optional[str] = None,
+                       confirm: bool = False,
+                       ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
+    """Resize a CCE workload: adjust replicas and/or resource limits (CPU/memory)
+
+    ⚠️ 二次确认机制：
+    - 第一步：不带 confirm 参数调用，返回当前配置和变更预览
+    - 第二步：带 confirm=true 再次调用，执行操作
+
+    支持的参数（均可选，至少提供一个）：
+    - replicas: 副本数
+    - cpu_limit: CPU limit（如 "4", "2", "500m"）
+    - memory_limit: 内存 limit（如 "1Gi", "512Mi"）
+    - cpu_request: CPU request（如 "100m", "500m"）
+    - memory_request: 内存 request（如 "512Mi", "1Gi"）
+
+    Example:
+        # 第一步：预览操作
+        resize_cce_workload region=xxx cluster_id=xxx workload_type=deployment name=nginx namespace=default cpu_limit=4
+
+        # 第二步：确认执行
+        resize_cce_workload region=xxx cluster_id=xxx workload_type=deployment name=nginx namespace=default cpu_limit=4 confirm=true
+
+    Args:
+        region: Huawei Cloud region (e.g. cn-north-4)
+        cluster_id: CCE cluster ID
+        workload_type: 'deployment' or 'statefulset'
+        name: Workload name
+        namespace: Kubernetes namespace
+        replicas: Target replicas (optional)
+        cpu_limit: CPU limit string (optional)
+        memory_limit: Memory limit string (optional)
+        cpu_request: CPU request string (optional)
+        memory_request: Memory request string (optional)
+        confirm: True to confirm and execute (default: False)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+
+    Returns:
+        Dictionary with resize result
+    """
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {
+            "success": False,
+            "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+        }
+
+    if not cluster_id:
+        return {"success": False, "error": "cluster_id is required"}
+
+    if not name or not namespace:
+        return {"success": False, "error": "name and namespace are required"}
+
+    if workload_type not in ['deployment', 'statefulset']:
+        return {"success": False, "error": "workload_type must be 'deployment' or 'statefulset'"}
+
+    # 至少需要一个变更参数
+    change_params = {k: v for k, v in [('replicas', replicas), ('cpu_limit', cpu_limit),
+                                        ('memory_limit', memory_limit), ('cpu_request', cpu_request),
+                                        ('memory_request', memory_request)] if v is not None}
+    if not change_params:
+        return {"success": False, "error": "At least one of replicas/cpu_limit/memory_limit/cpu_request/memory_request must be specified"}
+
+    if not K8S_AVAILABLE:
+        return {"success": False, "error": f"Kubernetes SDK not installed: {K8S_IMPORT_ERROR}"}
+
+    if not SDK_AVAILABLE:
+        return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+
+    cert_file = None
+    key_file = None
+
+    try:
+        # Get cluster credentials
+        cce_client = create_cce_client(region, access_key, secret_key, proj_id)
+
+        cert_request = CreateKubernetesClusterCertRequest()
+        cert_request.cluster_id = cluster_id
+        body = ClusterCertDuration()
+        body.duration = 1
+        cert_request.body = body
+
+        cert_response = cce_client.create_kubernetes_cluster_cert(cert_request)
+        kubeconfig_data = cert_response.to_dict()
+
+        # Find external cluster endpoint
+        external_cluster = None
+        for c in kubeconfig_data.get('clusters', []):
+            if 'external' in c.get('name', '') and 'TLS' not in c.get('name', ''):
+                external_cluster = c
+                break
+        if not external_cluster:
+            external_cluster = kubeconfig_data.get('clusters', [{}])[0]
+        if not external_cluster:
+            return {"success": False, "error": "Could not find cluster endpoint"}
+
+        # Configure Kubernetes client
+        configuration = k8s_client.Configuration()
+        configuration.host = external_cluster.get('cluster', {}).get('server')
+        configuration.verify_ssl = False
+
+        user_data = None
+        for u in kubeconfig_data.get('users', []):
+            if u.get('name') == 'user':
+                user_data = u.get('user', {})
+                break
+
+        if user_data and user_data.get('client_certificate_data'):
+            cert_file = f'/tmp/cce_resize_client_{os.getpid()}.crt'
+            with open(cert_file, 'wb') as f:
+                f.write(base64.b64decode(user_data['client_certificate_data']))
+            configuration.cert_file = cert_file
+
+        if user_data and user_data.get('client_key_data'):
+            key_file = f'/tmp/cce_resize_client_{os.getpid()}.key'
+            with open(key_file, 'wb') as f:
+                f.write(base64.b64decode(user_data['client_key_data']))
+            configuration.key_file = key_file
+
+        _register_cert_file(cert_file)
+        _register_cert_file(key_file)
+
+        k8s_client.Configuration.set_default(configuration)
+        apps_v1 = k8s_client.AppsV1Api()
+
+        # 读取当前工作负载
+        if workload_type == 'deployment':
+            workload_obj = apps_v1.read_namespaced_deployment(name, namespace)
+        else:
+            workload_obj = apps_v1.read_namespaced_stateful_set(name, namespace)
+
+        # 收集当前配置
+        old_replicas = workload_obj.spec.replicas
+        containers = workload_obj.spec.template.spec.containers
+        old_resources = {}
+        for c in containers:
+            res = c.resources
+            old_limits = dict(res.limits) if res and res.limits else {}
+            old_requests = dict(res.requests) if res and res.requests else {}
+            old_resources[c.name] = {
+                'limits': old_limits,
+                'requests': old_requests
+            }
+
+        # ========== 二次确认机制 ==========
+        if not confirm:
+            changes_desc = []
+            if replicas is not None:
+                changes_desc.append(f"replicas: {old_replicas} → {replicas}")
+            if cpu_limit is not None:
+                old_val = old_resources.get(containers[0].name, {}).get('limits', {}).get('cpu', 'unset')
+                changes_desc.append(f"cpu_limit: {old_val} → {cpu_limit}")
+            if memory_limit is not None:
+                old_val = old_resources.get(containers[0].name, {}).get('limits', {}).get('memory', 'unset')
+                changes_desc.append(f"memory_limit: {old_val} → {memory_limit}")
+            if cpu_request is not None:
+                old_val = old_resources.get(containers[0].name, {}).get('requests', {}).get('cpu', 'unset')
+                changes_desc.append(f"cpu_request: {old_val} → {cpu_request}")
+            if memory_request is not None:
+                old_val = old_resources.get(containers[0].name, {}).get('requests', {}).get('memory', 'unset')
+                changes_desc.append(f"memory_request: {old_val} → {memory_request}")
+
+            return {
+                "success": False,
+                "requires_confirmation": True,
+                "operation": "resize_workload",
+                "warning": f"⚠️ 危险操作：即将修改 {workload_type} '{name}' (命名空间: {namespace}) 的资源配置",
+                "cluster_id": cluster_id,
+                "namespace": namespace,
+                "name": name,
+                "workload_type": workload_type,
+                "current_config": {
+                    "replicas": old_replicas,
+                    "containers": old_resources
+                },
+                "changes": changes_desc,
+                "hint": "确认操作请添加 confirm=true 参数",
+                "example": f"resize_cce_workload region={region} cluster_id={cluster_id} workload_type={workload_type} name={name} namespace={namespace} " + " ".join(f"{k}={v}" for k, v in change_params.items()) + " confirm=true"
+            }
+
+        # ========== 执行变更 ==========
+        # 修改副本数
+        if replicas is not None:
+            workload_obj.spec.replicas = replicas
+
+        # 修改容器资源 (应用到第一个容器，如需指定可用 container_name 参数扩展)
+        for container in containers:
+            if container.resources is None:
+                container.resources = k8s_client.V1ResourceRequirements()
+            if container.resources.limits is None:
+                container.resources.limits = {}
+            if container.resources.requests is None:
+                container.resources.requests = {}
+
+            if cpu_limit is not None:
+                container.resources.limits['cpu'] = cpu_limit
+            if memory_limit is not None:
+                container.resources.limits['memory'] = memory_limit
+            if cpu_request is not None:
+                container.resources.requests['cpu'] = cpu_request
+            if memory_request is not None:
+                container.resources.requests['memory'] = memory_request
+
+        # 提交更新
+        if workload_type == 'deployment':
+            apps_v1.replace_namespaced_deployment(name, namespace, workload_obj)
+        else:
+            apps_v1.replace_namespaced_stateful_set(name, namespace, workload_obj)
+
+        # 读取更新后的配置
+        if workload_type == 'deployment':
+            new_obj = apps_v1.read_namespaced_deployment(name, namespace)
+        else:
+            new_obj = apps_v1.read_namespaced_stateful_set(name, namespace)
+
+        new_resources = {}
+        for c in new_obj.spec.template.spec.containers:
+            res = c.resources
+            new_limits = dict(res.limits) if res and res.limits else {}
+            new_requests = dict(res.requests) if res and res.requests else {}
+            new_resources[c.name] = {
+                'limits': new_limits,
+                'requests': new_requests
+            }
+
+        # 清理临时证书
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
+
+        return {
+            "success": True,
+            "region": region,
+            "cluster_id": cluster_id,
+            "action": f"resize_{workload_type}",
+            "workload_type": workload_type,
+            "name": name,
+            "namespace": namespace,
+            "old_replicas": old_replicas,
+            "new_replicas": new_obj.spec.replicas,
+            "old_resources": old_resources,
+            "new_resources": new_resources,
+            "message": f"{workload_type.capitalize()} '{name}' resized successfully"
+        }
+
+    except Exception as e:
+        _safe_delete_file(cert_file)
+        _safe_delete_file(key_file)
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__
+        }
+
+
 def delete_cce_workload(region: str, cluster_id: str, workload_type: str, name: str, namespace: str, confirm: bool = False, ak: Optional[str] = None, sk: Optional[str] = None, project_id: Optional[str] = None) -> Dict[str, Any]:
     """Delete a CCE workload (Deployment or StatefulSet)
 
@@ -4115,3 +4375,171 @@ def cce_node_status(region: str, cluster_id: str, node_name: str,
         Dictionary with node status (schedulable, ready, conditions)
     """
     return _node_operation(region, cluster_id, node_name, 'status', confirm=True, ak=ak, sk=sk, project_id=project_id)
+
+
+def bind_cce_cluster_eip(
+    region: str,
+    cluster_id: str,
+    eip_id: str,
+    ak: Optional[str] = None,
+    sk: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Bind an EIP to a CCE cluster master node for public API access
+
+    Associates an existing Elastic IP with the cluster's control plane,
+    enabling public access to the Kubernetes API server.
+
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        cluster_id: CCE cluster ID
+        eip_id: EIP resource ID to bind (use huawei_list_eip to find available EIPs)
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+
+    Returns:
+        Dictionary with result including the public endpoint URL
+    """
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {
+            "success": False,
+            "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+        }
+
+    if not cluster_id:
+        return {"success": False, "error": "cluster_id is required"}
+
+    if not eip_id:
+        return {"success": False, "error": "eip_id is required"}
+
+    if not SDK_AVAILABLE:
+        return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+
+    try:
+        from huaweicloudsdkcce.v3 import (
+            UpdateClusterEipRequest,
+            MasterEIPRequest,
+            MasterEIPRequestSpec,
+            MasterEIPRequestSpecSpec,
+        )
+
+        client = create_cce_client(region, access_key, secret_key, proj_id)
+
+        spec_spec = MasterEIPRequestSpecSpec(id=eip_id)
+        spec = MasterEIPRequestSpec(action="bind", spec=spec_spec)
+        body = MasterEIPRequest(spec=spec)
+        request = UpdateClusterEipRequest(cluster_id=cluster_id, body=body)
+
+        client.update_cluster_eip(request)
+
+        # Query cluster to get the updated endpoint
+        from huaweicloudsdkcce.v3 import ShowClusterRequest
+        resp = client.show_cluster(ShowClusterRequest(cluster_id=cluster_id))
+        public_url = None
+        if hasattr(resp, 'status') and hasattr(resp.status, 'endpoints'):
+            for ep in resp.status.endpoints:
+                if ep.type == "External":
+                    public_url = ep.url
+                    break
+
+        result = {
+            "success": True,
+            "region": region,
+            "cluster_id": cluster_id,
+            "action": "bind_cce_cluster_eip",
+            "eip_id": eip_id,
+            "message": "EIP bound to cluster master successfully",
+        }
+        if public_url:
+            result["public_endpoint"] = public_url
+
+        return result
+
+    except ClientRequestException as e:
+        return {
+            "success": False,
+            "error": f"{e.error_code} - {e.error_msg}",
+            "request_id": getattr(e, "request_id", None),
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
+
+
+def unbind_cce_cluster_eip(
+    region: str,
+    cluster_id: str,
+    ak: Optional[str] = None,
+    sk: Optional[str] = None,
+    project_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Unbind the EIP from a CCE cluster master node
+
+    Removes the Elastic IP association from the cluster's control plane,
+    disabling public access to the Kubernetes API server.
+
+    Args:
+        region: Huawei Cloud region (e.g., cn-north-4)
+        cluster_id: CCE cluster ID
+        ak: Access Key ID (optional)
+        sk: Secret Access Key (optional)
+        project_id: Project ID (optional)
+
+    Returns:
+        Dictionary with result
+    """
+    access_key, secret_key, proj_id = get_credentials(ak, sk, project_id)
+
+    if not access_key or not secret_key:
+        return {
+            "success": False,
+            "error": "Credentials not provided. Set HUAWEI_AK and HUAWEI_SK environment variables or pass as parameters."
+        }
+
+    if not cluster_id:
+        return {"success": False, "error": "cluster_id is required"}
+
+    if not SDK_AVAILABLE:
+        return {"success": False, "error": f"Huawei Cloud SDK not installed: {IMPORT_ERROR}"}
+
+    try:
+        from huaweicloudsdkcce.v3 import (
+            UpdateClusterEipRequest,
+            MasterEIPRequest,
+            MasterEIPRequestSpec,
+        )
+
+        client = create_cce_client(region, access_key, secret_key, proj_id)
+
+        spec = MasterEIPRequestSpec(action="unbind")
+        body = MasterEIPRequest(spec=spec)
+        request = UpdateClusterEipRequest(cluster_id=cluster_id, body=body)
+
+        client.update_cluster_eip(request)
+
+        return {
+            "success": True,
+            "region": region,
+            "cluster_id": cluster_id,
+            "action": "unbind_cce_cluster_eip",
+            "message": "EIP unbound from cluster master successfully",
+        }
+
+    except ClientRequestException as e:
+        return {
+            "success": False,
+            "error": f"{e.error_code} - {e.error_msg}",
+            "request_id": getattr(e, "request_id", None),
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }
