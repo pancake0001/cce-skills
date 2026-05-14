@@ -102,16 +102,41 @@ spec:
             - /bin/sh
             - -c
             - |
-              # Only copy files if workspace is empty (first install)
+              {{- if .Values.openclaw.agents.list }}
+              {{- range $agent := .Values.openclaw.agents.list }}
+              WS="/home/openclaw/.openclaw/{{ $agent.workspace | replace "~/.openclaw/" "" }}"
+              echo "--- Agent: {{ $agent.id }} ($WS) ---"
+              mkdir -p "$WS"
+              mkdir -p /home/openclaw/.openclaw/agents/{{ $agent.id }}/agent
+              mkdir -p /home/openclaw/.openclaw/agents/{{ $agent.id }}/sessions
+              cp /workspace-files/* "$WS/" 2>/dev/null || true
+              {{- $agentFiles := index $.Values.workspace.agents $agent.id }}
+              {{- if $agentFiles }}
+              if [ ! -f "$WS/SOUL.md" ]; then
+                echo "  Writing per-agent workspace files..."
+                {{- if $agentFiles.soul }}
+                echo {{ $agentFiles.soul | b64enc | quote }} | base64 -d > "$WS/SOUL.md"
+                {{- end }}
+                {{- if $agentFiles.identity }}
+                echo {{ $agentFiles.identity | b64enc | quote }} | base64 -d > "$WS/IDENTITY.md"
+                {{- end }}
+                {{- if $agentFiles.agents }}
+                echo {{ $agentFiles.agents | b64enc | quote }} | base64 -d > "$WS/AGENTS.md"
+                {{- end }}
+                {{- if $agentFiles.heartbeat }}
+                echo {{ $agentFiles.heartbeat | b64enc | quote }} | base64 -d > "$WS/HEARTBEAT.md"
+                {{- end }}
+              fi
+              {{- end }}
+              {{- end }}
+              {{- else }}
               if [ ! -f /home/openclaw/.openclaw/workspace/SOUL.md ]; then
                 echo "Initializing workspace files..."
                 mkdir -p /home/openclaw/.openclaw/workspace
                 cp /workspace-files/* /home/openclaw/.openclaw/workspace/ 2>/dev/null || true
-                chown -R 1000:1000 /home/openclaw/.openclaw/workspace
-                echo "Workspace initialized."
-              else
-                echo "Workspace already exists, skipping initialization."
               fi
+              {{- end }}
+              chown -R 1000:1000 /home/openclaw/.openclaw
           securityContext:
             runAsUser: 0
             runAsNonRoot: false
@@ -256,6 +281,7 @@ spec:
           secret:
             secretName: {{ .Values.sandbox.sshSecretName | default (printf "%s-ssh-key" .Release.Name) }}
             optional: false
+            defaultMode: 0400
         {{- end }}
         - name: data
           {{- if .Values.persistence.enabled }}

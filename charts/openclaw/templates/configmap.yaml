@@ -38,10 +38,15 @@ data:
     {{- $contextPruning := dict "mode" .Values.openclaw.agents.defaults.contextPruning.mode "ttl" .Values.openclaw.agents.defaults.contextPruning.ttl "keepLastAssistants" .Values.openclaw.agents.defaults.contextPruning.keepLastAssistants }}
     {{- $_ := set $agentDefaults "contextPruning" $contextPruning }}
     {{- end }}
-    {{- if and .Values.sandbox.enabled .Values.sandbox.agents.list }}
+    {{- if .Values.openclaw.agents.defaults.memorySearch }}
+    {{- $_ := set $agentDefaults "memorySearch" .Values.openclaw.agents.defaults.memorySearch }}
+    {{- end }}
+    {{- if and .Values.sandbox.enabled .Values.sandbox.agents.list (not .Values.openclaw.agents.list) }}
     {{- $sandboxDefaults := dict "mode" "all" "backend" "ssh" "scope" "agent" }}
+    {{- $firstAgent := index .Values.sandbox.agents.list 0 }}
     {{- $_ := set $sandboxDefaults "ssh" (dict
-      "workspaceRoot" "/home/openclaw/workspace"
+      "target" (printf "sandbox@%s-sandbox-%s.%s.svc.cluster.local" $.Release.Name $firstAgent.id (default "openclaw" $.Release.Namespace))
+      "workspaceRoot" (printf "/home/sandbox/workspace/%s" (default $firstAgent.id $firstAgent.workspaceSubPath))
       "strictHostKeyChecking" false
       "updateHostKeys" true
       "identityFile" "/home/openclaw/.ssh/gateway_sandbox_key"
@@ -62,10 +67,10 @@ data:
     {{- range $i, $agent := $agentsList }}
     {{- $sandboxCfg := index $sandboxAgentsMap $agent.id }}
     {{- if and $sandboxCfg $sandboxCfg.enabled }}
-    {{- $sandboxConfig := dict "backend" "ssh" "scope" "agent" }}
+    {{- $sandboxConfig := dict "mode" "all" "backend" "ssh" "scope" "agent" }}
     {{- $workspaceRoot := printf "/home/sandbox/workspace/%s" (default .id $sandboxCfg.workspaceSubPath) }}
     {{- $_ := set $sandboxConfig "ssh" (dict
-      "target" (printf "sandbox@%s-sandbox-%s.%s.svc.cluster.local:22" $.Release.Name $agent.id (default "openclaw" $.Release.Namespace))
+      "target" (printf "sandbox@%s-sandbox-%s.%s.svc.cluster.local" $.Release.Name $agent.id (default "openclaw" $.Release.Namespace))
       "workspaceRoot" $workspaceRoot
       "strictHostKeyChecking" false
       "updateHostKeys" true
@@ -78,6 +83,12 @@ data:
     {{- end }}
     {{- $_ := set $agents "list" $agentsList }}
     {{- $_ := set $config "agents" $agents }}
+    {{- end }}
+    {{- if .Values.session }}
+    {{- $_ := set $config "session" .Values.session }}
+    {{- end }}
+    {{- if .Values.memory }}
+    {{- $_ := set $config "memory" .Values.memory }}
     {{- end }}
     {{- if .Values.openclaw.bindings }}
     {{- $_ := set $config "bindings" .Values.openclaw.bindings }}
@@ -97,6 +108,10 @@ data:
     {{- if .Values.openclaw.providers }}
     {{- $models := dict "mode" "merge" "providers" .Values.openclaw.providers }}
     {{- $_ := set $config "models" $models }}
+    {{- end }}
+    {{- if .Values.openclaw.agentToAgent }}
+    {{- $tools := dict "agentToAgent" .Values.openclaw.agentToAgent }}
+    {{- $_ := set $config "tools" $tools }}
     {{- end }}
     {{- if .Values.openclaw.configOverrides }}
     {{- $config = mergeOverwrite $config .Values.openclaw.configOverrides }}
